@@ -32,6 +32,7 @@ import type { SelfAuthoredSkill } from '../../skills/SelfAuthoredSkillLoader';
 import { TRUSTED_SKILL_TIERS } from '../../skills/SkillProvenanceStore';
 import { isSkillEnabled } from '../../skills/skillToggleGate';
 import { renderSkillInventory } from '../../skills/skillInventoryRenderer';
+import { buildSkillStorageContext } from '../../skills/skillStorageContext';
 import { isSafePathSegment } from '../../utils/safePathName';
 import {
     CompositionCycleError,
@@ -237,7 +238,8 @@ export class InvokeSkillTool extends BaseTool<'invoke_skill'> {
         }
 
         try {
-            const message = this.composeSubtaskMessage(
+            const storage = await buildSkillStorageContext(this.plugin.app, skill.body);
+            const message = storage + this.composeSubtaskMessage(
                 skillName,
                 skill.body,
                 subArgs,

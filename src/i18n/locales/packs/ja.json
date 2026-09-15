@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "ユーザーに確認の質問をします",
     "tool.attempt_completion": "タスク完了",
     "tool.attempt_completion.desc": "タスクの完了を通知します",
+    "tool.work_journal": "作業の検証記録",
+    "tool.work_journal.desc": "仮説を記録し、結果をローカルで検証する",
     "tool.update_todo_list": "ToDoを更新",
     "tool.update_todo_list.desc": "チャットにタスクのチェックリストを表示します",
     "tool.new_task": "サブエージェントを起動",

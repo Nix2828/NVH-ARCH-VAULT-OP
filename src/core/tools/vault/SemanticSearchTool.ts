@@ -325,11 +325,11 @@ export class SemanticSearchTool extends BaseTool<'semantic_search'> {
                 const seenGraph = new Set<string>();
 
                 for (const r of results) {
-                    if (graphLines.length >= 5) break;
+                    if (graphLinkedCount >= 5) break;
                     const neighbors = graphStore.getNeighborsWithImplicit(r.path, hops, 10)
                         .sort((a, b) => b.confidence - a.confidence);
                     for (const n of neighbors) {
-                        if (graphLines.length >= 5) break;
+                        if (graphLinkedCount >= 5) break;
                         if (topKPaths.has(n.path) || seenGraph.has(n.path)) continue;
                         seenGraph.add(n.path);
                         const chunks: string[] = await semanticIndex.getChunksByPath(n.path);
@@ -340,14 +340,13 @@ export class SemanticSearchTool extends BaseTool<'semantic_search'> {
                         const edgeLabel = getGraphEdgeLabel(n);
                         const marker = edgeLabel.contradicts ? '[contradicts] ' : '';
                         const ctx = `via ${toWikilink(n.viaPath)} (${edgeLabel.label}, confidence: ${n.confidence.toFixed(2)})`;
-                        graphLines.push(`${graphLines.length + 1}. ${marker}${toWikilink(n.path)} - \`${n.path}\` (${ctx})`);
+                        graphLines.push(`${++graphLinkedCount}. ${marker}${toWikilink(n.path)} - \`${n.path}\` (${ctx})`);
                         graphLines.push(truncate(chunks[0]));
                         graphLines.push('');
                     }
                 }
 
                 if (graphLines.length > 0) {
-                    graphLinkedCount = seenGraph.size;
                     lines.push('─────────────────────────────────────────');
                     lines.push(`Graph context (${hops}-hop expansion):`);
                     lines.push('(Connected via Wikilinks, MOC, or semantic similarity — sorted by confidence)\n');

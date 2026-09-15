@@ -79,6 +79,7 @@ import { ClipWebPageTool } from './web/ClipWebPageTool';
 // Import tools — agent control
 import { AskFollowupQuestionTool } from './agent/AskFollowupQuestionTool';
 import { AttemptCompletionTool } from './agent/AttemptCompletionTool';
+import { WorkJournalTool } from './agent/WorkJournalTool';
 import { UpdateTodoListTool } from './agent/UpdateTodoListTool';
 import { SwitchModeTool } from './agent/SwitchModeTool';
 import { NewTaskTool } from './agent/NewTaskTool';
@@ -246,6 +247,7 @@ export class ToolRegistry {
         this.register(new AskFollowupQuestionTool(this.plugin));
         this.register(new AttemptCompletionTool(this.plugin));
         this.register(new UpdateTodoListTool(this.plugin));
+        this.register(new WorkJournalTool(this.plugin, esbuildManager));
         this.register(new SwitchModeTool(this.plugin));
         this.register(new NewTaskTool(this.plugin));
         this.register(new InvestigateTool(this.plugin));

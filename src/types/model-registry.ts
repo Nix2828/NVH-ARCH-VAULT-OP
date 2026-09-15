@@ -507,6 +507,8 @@ export function getModelEffortLevels(modelId: string, providerType: string): Eff
         && !modelUsesBudgetTokensThinking(modelId);
     // GPT-5 family and the reasoning o-series (o1..o9 plus o-mini variants).
     const isOpenAiReasoning = /^gpt-5(\b|[.-])/.test(normalized) || /^o[1-9](\b|[.-])/.test(normalized);
+    // Explicit current capabilities, never infer capabilities for unknown future families.
+    const isModernOpenAiReasoning = /^gpt-(?:6-astra|5\.6(?:-(?:luna|sol|terra))?)(?:$|-20\d\d-)/.test(normalized);
 
     // Claude-capable providers send the effort via the native Anthropic surface.
     if (isEffortCapableClaude && (provider === 'anthropic' || provider === 'bedrock' || provider === 'openrouter')) {
@@ -515,13 +517,13 @@ export function getModelEffortLevels(modelId: string, providerType: string): Eff
 
     // OpenAI-style reasoning providers send reasoning.effort / reasoning_effort.
     if (
-        isOpenAiReasoning &&
+        (isOpenAiReasoning || isModernOpenAiReasoning) &&
         (provider === 'openai' ||
             provider === 'github-copilot' ||
             provider === 'chatgpt-oauth' ||
             provider === 'openrouter')
     ) {
-        return [...OPENAI_EFFORT_LEVELS];
+        return isModernOpenAiReasoning ? [...OPENAI_EFFORT_LEVELS, 'xhigh', 'max'] : [...OPENAI_EFFORT_LEVELS];
     }
 
     return [];

@@ -26,6 +26,7 @@ import {
     addUsage, createUsageByModel, crossesLongContextTier, promptTokensOf,
     UNKNOWN_MODEL_KEY, type UsageByModel,
 } from '../pricing/ModelPricing';
+import { parseWorkJournal, type WorkJournalData } from './WorkJournal';
 
 export type LoopPhase =
     | 'preamble'
@@ -38,6 +39,8 @@ export type LoopPhase =
     | 'failed';
 
 export interface AgentLoopState {
+    /** On-demand evidence, independent of history compaction. No cost when absent. */
+    workJournal?: WorkJournalData;
     /** Coarse phase for diagnostics and (W3) resume. */
     phase: LoopPhase;
     /** Current iteration of the inner for-loop (0-based). */
@@ -288,7 +291,8 @@ function compactUsageLedger(state: AgentLoopState): void {
  * so one level of copying is the whole job.
  */
 export function cloneLoopState(state: AgentLoopState): AgentLoopState {
-    return { ...state, usage: state.usage.map((r) => ({ ...r })) };
+    return { ...state, usage: state.usage.map((r) => ({ ...r })),
+        ...(state.workJournal ? { workJournal: parseWorkJournal(state.workJournal) } : {}) };
 }
 
 /** Sum of the ledger. */

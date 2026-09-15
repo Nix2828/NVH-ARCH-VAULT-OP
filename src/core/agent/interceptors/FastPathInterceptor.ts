@@ -118,10 +118,10 @@ export class FastPathInterceptor implements LoopInterceptor {
                         {
                             role: 'user',
                             content: `[Fast Path completed] The recipe "${bestMatch.recipe.name}" has been executed. `
-                                + `${result.toolCallsExecuted} tool calls completed successfully. `
+                                + `${result.toolCallsExecuted} tool calls returned; check individual results for errors. `
                                 + `The search and read results are above. `
                                 + `Now: analyze the results and complete the task (write summary, present findings). `
-                                + `Do NOT re-search or re-read the same content -- use the results already in context.`,
+                                + `Reuse complete results already in context. Read externalized references or missing evidence before making source-based claims.`,
                         },
                     ];
                     this.firedFlag = true;

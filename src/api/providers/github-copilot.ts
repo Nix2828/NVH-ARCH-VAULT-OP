@@ -23,6 +23,7 @@ import {
 } from '../../core/security/GitHubCopilotAuthService';
 import { resolveOutputBudget, estimatePromptTokens, modelUsesBudgetTokensThinking, modelSupportsTemperature, getModelInfo, getModelEffortSupport } from '../../types/model-registry';
 import { logCacheStat } from '../logCacheStat';
+import { responsesScope, estimateResponsesContinuationTokens } from '../adapters/responsesContinuation';
 import { normalizeDeltaContent } from './utils/openAiContent';
 import { flushToolCallAccumulators, type ToolCallAccumulator } from './utils/toolCallFlush';
 import { convertToOpenAiChatMessages, convertToOpenAiChatTools } from '../adapters/openaiChat';
@@ -149,6 +150,10 @@ export class GitHubCopilotProvider implements ApiHandler {
             // path gemini/custom/ollama/lmstudio use (ADR-064).
             fetch: this.authService.getCopilotFetch(createNodeFetch()),
         });
+    }
+
+    estimateProviderStateTokens(state: import('../types').ProviderState | undefined): number {
+        return estimateResponsesContinuationTokens(state, responsesScope(this.config));
     }
 
     getModel(): { id: string; info: ModelInfo } {
@@ -458,7 +463,7 @@ export class GitHubCopilotProvider implements ApiHandler {
             // missed it. The gpt-5.6 lineup routes here, which is most of the
             // logged Copilot traffic, and it kept sending the sentinel.
             instructions: stripCacheBreakpointMarker(systemPrompt),
-            input: convertToResponsesInput(messages),
+            input: convertToResponsesInput(messages, responsesScope(this.config)),
             stream: true,
             max_output_tokens: effectiveMaxTokens,
         };
@@ -508,7 +513,7 @@ export class GitHubCopilotProvider implements ApiHandler {
      *     lineup is picked for agentic work, where reasoning depth is the point.
      */
     private resolveEffort(): ReasoningEffort | undefined {
-        const explicit = asGptEffort(this.config.reasoningEffort);
+        const explicit = asGptEffort(this.config.reasoningEffort, this.config);
         if (explicit) return explicit;
         if (this.config.thinkingEnabled === false) return undefined;
         return COPILOT_DEFAULT_EFFORT;
@@ -549,7 +554,7 @@ export class GitHubCopilotProvider implements ApiHandler {
             }
         }
 
-        const state = createResponsesStreamState();
+        const state = createResponsesStreamState(responsesScope(this.config));
         for await (const event of stream) {
             yield* responsesEventToChunks(event as Record<string, unknown>, state);
         }
@@ -612,7 +617,7 @@ export class GitHubCopilotProvider implements ApiHandler {
         if (getModelEffortSupport(this.config.model, 'github-copilot')) {
             // A one-line classification does not benefit from deep reasoning,
             // and the tokens are billed either way.
-            body.reasoning = { effort: resolveGptEffort(this.config.reasoningEffort, 'low') };
+            body.reasoning = { effort: resolveGptEffort(this.config.reasoningEffort, 'low', this.config) };
         }
 
         const stream = await this.createResponsesStream(body, abortSignal);
@@ -672,4 +677,3 @@ export class GitHubCopilotProvider implements ApiHandler {
         }
     }
 }
-

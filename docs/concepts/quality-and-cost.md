@@ -23,13 +23,19 @@ Tools opt in via a `qualityGate` flag in `src/core/tools/toolMetadata.ts`, and t
 
 Quality gates catch many shape errors but not subjective ones. A visually correct slide deck can still miss the point. They are a safety net, not a quality guarantee.
 
+## Work journal and local verification
+
+For tasks that need explicit evidence, the agent can load `work_journal` to record hypotheses, artifacts, checks and experiment results. The journal survives context compression and task recovery. File, JSON and grid checks run locally; experiments use an isolated sandbox. These checks do not call a second model.
+
+When a registered check is open or failed, the host prevents the task from being marked successfully complete. It reports the missing evidence without automatically starting another model turn. The agent still has to choose useful checks, and passing them proves only the properties they cover.
+
 ## Cost awareness
 
 ADR-90 outlines a multi-lever approach to keep agent cost predictable. Three of the levers are visible to you:
 
 **Live counters.** The sidebar footer shows running token counts (input, output) and the EUR cost so far for the active conversation. The price registry covers every supported model. Switching models updates the cost projection in real time.
 
-**Tool ordering in the system prompt.** Cheap tools (read, list, search) appear earlier in the tool catalog than expensive ones (sub-agent spawn, deep ingest, web search). Frontier models tend to pick from the top of the list, so this nudges the agent toward the lighter approach first.
+**A small initial tool catalog.** The prompt exposes core tools and short guidance for discovering specialized tools when needed. This reduces the definitions sent repeatedly to the model.
 
 **Sub-agent justification.** `new_task` is restricted to three categories (parallel work, specialist mode, escalation). The agent has to name the category in the call, which discourages spawning sub-agents out of habit.
 
@@ -57,3 +63,5 @@ A quality gate failure pushes the agent into a corrective turn, which costs toke
 - ADR-106: severity tiers for health findings (overlaps with the budget gate)
 
 See also: [Token optimization](./token-optimization.md), [Choosing a model](/guides/choosing-a-model).
+
+Latest release: [3.8.2: harness improvements](../releases/v3.8.md).

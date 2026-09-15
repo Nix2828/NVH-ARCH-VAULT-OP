@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "向使用者提出釐清問題",
     "tool.attempt_completion": "完成任務",
     "tool.attempt_completion.desc": "表示任務已完成",
+    "tool.work_journal": "工作驗證記錄",
+    "tool.work_journal.desc": "記錄假設並在本機驗證結果",
     "tool.update_todo_list": "更新待辦事項",
     "tool.update_todo_list.desc": "在聊天中顯示任務清單",
     "tool.new_task": "產生子代理",

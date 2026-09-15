@@ -31,7 +31,7 @@ import type { AutoApprovalConfig } from '../../types/settings';
 export type ToolEffect =
     /** No mutation, no egress. Always runs automatically. */
     | 'read'
-    /** Pure loop/UI control, nothing is persisted. Always runs automatically. */
+    /** Local loop/UI control, no vault mutations. Always runs automatically. */
     | 'ui'
     /** Note content CUD. */
     | 'note-edit'
@@ -130,10 +130,12 @@ export const TOOL_EFFECTS: Record<string, ToolEffectSpec> = {
     // vault create outside the gate.
     get_daily_note: (input) => (input?.create === true ? 'note-edit' : 'read'),
 
-    // --- UI / loop control: nothing is persisted -----------------------------
+    // --- UI / local loop control: no vault mutations -----------------------------
     attempt_completion: 'ui',
     ask_followup_question: 'ui',
     update_todo_list: 'ui',
+    // Local task evidence and bridge-disabled computations; no vault mutation.
+    work_journal: 'ui',
     open_note: 'ui',
     switch_agent: 'ui',
     find_tool: 'ui',

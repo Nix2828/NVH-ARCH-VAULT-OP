@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "Poser une question de clarification à l'utilisateur",
     "tool.attempt_completion": "Terminer la tâche",
     "tool.attempt_completion.desc": "Signaler que la tâche est terminée",
+    "tool.work_journal": "Preuves de travail",
+    "tool.work_journal.desc": "Suivre les hypothèses et vérifier les résultats localement",
     "tool.update_todo_list": "Mettre à jour les tâches",
     "tool.update_todo_list.desc": "Afficher une liste de tâches dans le chat",
     "tool.new_task": "Lancer un sous-agent",

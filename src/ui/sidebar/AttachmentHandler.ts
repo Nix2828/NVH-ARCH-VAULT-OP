@@ -94,6 +94,21 @@ export class AttachmentHandler {
      * in clear() (one compose turn = one budget).
      */
     private contextCharsUsed = 0;
+    /** Preparation must finish before a send consumes the attachment buffers. */
+    private readonly preparations = new Set<Promise<void>>();
+
+    get isProcessing(): boolean { return this.preparations.size > 0; }
+
+    async whenReady(): Promise<void> {
+        while (this.preparations.size > 0) await Promise.allSettled([...this.preparations]);
+    }
+
+    private async prepare(operation: () => Promise<void>): Promise<void> {
+        const pending = operation();
+        this.preparations.add(pending);
+        try { await pending; }
+        finally { this.preparations.delete(pending); }
+    }
 
     constructor(
         private vault: Vault,
@@ -116,6 +131,10 @@ export class AttachmentHandler {
     }
 
     async processFile(file: File): Promise<void> {
+        return this.prepare(() => this.processFileContent(file));
+    }
+
+    private async processFileContent(file: File): Promise<void> {
         // Documents (PDF, Office) get text-extracted — allow larger files.
         // Images get base64-encoded into context — keep stricter limit.
         const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
@@ -231,6 +250,10 @@ export class AttachmentHandler {
     }
 
     async addVaultFile(file: TFile): Promise<void> {
+        return this.prepare(() => this.addVaultFileContent(file));
+    }
+
+    private async addVaultFileContent(file: TFile): Promise<void> {
         try {
             const ext = file.extension.toLowerCase();
 

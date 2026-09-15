@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "사용자에게 확인 질문을 합니다",
     "tool.attempt_completion": "작업 완료",
     "tool.attempt_completion.desc": "작업이 완료되었음을 알립니다",
+    "tool.work_journal": "작업 검증 기록",
+    "tool.work_journal.desc": "가설을 기록하고 결과를 로컬에서 검증",
     "tool.update_todo_list": "할 일 업데이트",
     "tool.update_todo_list.desc": "채팅에 작업 체크리스트를 표시합니다",
     "tool.new_task": "서브 에이전트 생성",

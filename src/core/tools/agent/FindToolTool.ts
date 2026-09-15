@@ -73,7 +73,7 @@ export class FindToolTool extends BaseTool<'find_tool'> {
         // Minimum 3 chars: shorter tokens like "no", "at", "is" explode into
         // false positives (e.g. "no" matches "note" in every vault-note tool).
         const queryTokens = Array.from(new Set(
-            rawQuery.split(/[\s_-]+/).filter((t) => t.length >= 3),
+            rawQuery.split(/[\s_-]+/).filter((t) => t.length >= 3 && !['tool', 'tools', 'the', 'this', 'that', 'matches'].includes(t)),
         ));
         const queryPhrase = rawQuery.replace(/[_\s-]+/g, ' ').trim();
 
@@ -112,7 +112,8 @@ export class FindToolTool extends BaseTool<'find_tool'> {
         }
 
         matches.sort((a, b) => b.score - a.score);
-        const top = matches.slice(0, MAX_MATCHES);
+        const exact = matches.find(m => m.name === rawQuery);
+        const top = exact ? [exact] : matches.filter(m => m.score >= (matches[0]?.score ?? 0) * 0.7).slice(0, MAX_MATCHES);
 
         if (top.length === 0) {
             callbacks.pushToolResult(
@@ -133,7 +134,13 @@ export class FindToolTool extends BaseTool<'find_tool'> {
             context.activateDeferredTool(match.name);
         }
 
-        const lines = top.map((m) => `- ${m.name}: ${m.description}`);
+        const lines = top.map(m => {
+            const meta = TOOL_METADATA[m.name];
+            return `- ${m.name}: ${m.description}`
+                + (meta.whenToUse ? `\n  Best for: ${meta.whenToUse}` : '')
+                + (meta.commonMistakes ? `\n  Avoid: ${meta.commonMistakes}` : '')
+                + (meta.example ? `\n  Example: ${meta.example}` : '');
+        });
         callbacks.pushToolResult(
             this.formatSuccess(
                 `Activated ${top.length} tool${top.length === 1 ? '' : 's'} for this session:\n`

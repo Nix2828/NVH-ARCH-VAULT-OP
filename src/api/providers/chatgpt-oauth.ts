@@ -15,11 +15,11 @@
 import OpenAI from 'openai';
 import { requestUrl } from 'obsidian';
 import type { LLMProvider } from '../../types/settings';
-import type { ApiHandler, ApiStream, ApiStreamChunk, MessageParam, ModelInfo } from '../types';
-import { truncatedToolInputError } from '../types';
+import type { ApiHandler, ApiStream, MessageParam, ModelInfo } from '../types';
 import type { ToolDefinition } from '../../core/tools/types';
 import { ChatGptOAuthService } from '../../core/auth/ChatGptOAuthService';
-import { prepareResponsesRequest, resolveGptEffort, isGpt5Family, type ResponsesRequestBody } from '../adapters/openaiResponses';
+import { createResponsesStreamState, responsesEventToChunks, flushResponsesStreamState, prepareResponsesRequest, resolveGptEffort, isGpt5Family, type ResponsesRequestBody } from '../adapters/openaiResponses';
+import { responsesScope, estimateResponsesContinuationTokens } from '../adapters/responsesContinuation';
 import { getModelInfo } from '../../types/model-registry';
 
 void OpenAI; // retained: Errors instance kept for compatibility but not actively used
@@ -243,6 +243,10 @@ export class ChatGptOAuthProvider implements ApiHandler {
         this.auth = ChatGptOAuthService.getInstance();
     }
 
+    estimateProviderStateTokens(state: import('../types').ProviderState | undefined): number {
+        return estimateResponsesContinuationTokens(state, responsesScope(this.config));
+    }
+
     getModel(): { id: string; info: ModelInfo } {
         // Registry first for the context window (covers any GPT id it knows and
         // future Claude routing); KNOWN_MODELS stays as the override for the
@@ -273,7 +277,7 @@ export class ChatGptOAuthProvider implements ApiHandler {
             throw this.enhanceError(response.status, detail);
         }
 
-        yield* parseSseEvents(response, abortSignal);
+        yield* parseSseEvents(response, abortSignal, responsesScope(this.config));
     }
 
     async classifyText(prompt: string, abortSignal?: AbortSignal): Promise<string> {
@@ -287,7 +291,7 @@ export class ChatGptOAuthProvider implements ApiHandler {
             // Same low-floor default as createMessage; an explicit user effort
             // overrides it. (This is a tiny classification call, so the effort
             // rarely matters, but the surface stays consistent.)
-            body.reasoning = { effort: resolveGptEffort(this.config.reasoningEffort), summary: 'auto' };
+            body.reasoning = { effort: resolveGptEffort(this.config.reasoningEffort, 'low', this.config), summary: 'auto' };
         }
         const response = await this.streamRequest(body, abortSignal);
         if (response.status >= 400) {
@@ -477,16 +481,10 @@ function extractServerDetail(body: string): string | undefined {
 //   response.failed                       (terminal, with error)
 // ---------------------------------------------------------------------------
 
-interface ToolCallState {
-    callId: string;
-    name: string;
-    argsJson: string;
-}
-
-async function* parseSseEvents(response: NodeStreamResponse, _signal?: AbortSignal): ApiStream {
+async function* parseSseEvents(response: NodeStreamResponse, _signal?: AbortSignal, scope?: string): ApiStream {
     const decoder = new TextDecoder();
     let buffer = '';
-    const toolCalls = new Map<string, ToolCallState>();
+    const state = createResponsesStreamState(scope);
 
     for await (const chunk of response.stream) {
         buffer += decoder.decode(chunk, { stream: true });
@@ -497,14 +495,14 @@ async function* parseSseEvents(response: NodeStreamResponse, _signal?: AbortSign
             buffer = buffer.slice(eventEnd + 2);
             const parsed = parseSseBlock(rawEvent);
             if (!parsed) continue;
-            yield* dispatchEvent(parsed.eventName, parsed.data, toolCalls);
+            if (parsed.data === '[DONE]') continue;
+            let event: Record<string, unknown>;
+            try { event = JSON.parse(parsed.data) as Record<string, unknown>; } catch { continue; }
+            yield* responsesEventToChunks({ ...event, type: event.type ?? parsed.eventName }, state);
         }
     }
 
-    // Flush any remaining tool calls (shouldn't happen if response.completed arrived)
-    for (const tc of toolCalls.values()) {
-        yield* finalizeToolCall(tc);
-    }
+    yield* flushResponsesStreamState(state);
 }
 
 function parseSseBlock(block: string): { eventName: string; data: string } | null {
@@ -520,127 +518,4 @@ function parseSseBlock(block: string): { eventName: string; data: string } | nul
     }
     if (dataLines.length === 0) return null;
     return { eventName, data: dataLines.join('\n') };
-}
-
-function* dispatchEvent(
-    eventName: string,
-    data: string,
-    toolCalls: Map<string, ToolCallState>,
-): Generator<ApiStreamChunk> {
-    if (data === '[DONE]') return;
-
-    let parsed: Record<string, unknown>;
-    try {
-        parsed = JSON.parse(data) as Record<string, unknown>;
-    } catch {
-        return;
-    }
-
-    // type field on the event payload, fallback to eventName
-    const type = (parsed.type as string | undefined) ?? eventName;
-
-    if (type === 'response.output_text.delta') {
-        const delta = parsed.delta;
-        if (typeof delta === 'string' && delta.length > 0) {
-            yield { type: 'text', text: delta };
-        }
-        return;
-    }
-
-    if (type === 'response.output_item.added') {
-        const item = parsed.item as Record<string, unknown> | undefined;
-        if (item && item.type === 'function_call') {
-            const callId = (item.call_id as string | undefined) ?? (item.id as string);
-            const name = (item.name as string | undefined) ?? '';
-            toolCalls.set(callId, { callId, name, argsJson: '' });
-        }
-        return;
-    }
-
-    if (type === 'response.function_call_arguments.delta') {
-        const callId = (parsed.item_id as string | undefined) ?? (parsed.call_id as string | undefined);
-        const delta = parsed.delta as string | undefined;
-        if (callId && delta) {
-            const state = toolCalls.get(callId);
-            if (state) state.argsJson += delta;
-            else toolCalls.set(callId, { callId, name: '', argsJson: delta });
-        }
-        return;
-    }
-
-    if (type === 'response.output_item.done') {
-        const item = parsed.item as Record<string, unknown> | undefined;
-        if (item && item.type === 'function_call') {
-            const callId = (item.call_id as string | undefined) ?? (item.id as string);
-            const state = toolCalls.get(callId);
-            if (state) {
-                if (!state.name && typeof item.name === 'string') state.name = item.name;
-                if (!state.argsJson && typeof item.arguments === 'string') state.argsJson = item.arguments;
-                yield* finalizeToolCall(state);
-                toolCalls.delete(callId);
-            }
-        }
-        return;
-    }
-
-    if (type === 'response.completed') {
-        const responseObj = parsed.response as Record<string, unknown> | undefined;
-        const usage = responseObj?.usage as Record<string, unknown> | undefined;
-        if (usage) {
-            const input = num(usage.input_tokens) ?? num(usage.prompt_tokens) ?? 0;
-            const output = num(usage.output_tokens) ?? num(usage.completion_tokens) ?? 0;
-            // FIX-21-02-01 / IMP-18-01-02: input_tokens INCLUDES the cached
-            // prefix (input_tokens_details.cached_tokens). Report the
-            // non-cached part as inputTokens and the cached part separately,
-            // matching the other OpenAI-shaped providers, so the cost calc
-            // bills the cached prefix at the cache-read rate.
-            const details = usage.input_tokens_details as Record<string, unknown> | undefined;
-            const cachedIn = num(details?.cached_tokens) ?? 0;
-            yield {
-                type: 'usage',
-                inputTokens: Math.max(0, input - cachedIn),
-                outputTokens: output,
-                cacheReadTokens: cachedIn > 0 ? cachedIn : undefined,
-            };
-        }
-        // Drain any tool calls that didn't get an explicit done event
-        for (const tc of toolCalls.values()) yield* finalizeToolCall(tc);
-        toolCalls.clear();
-        return;
-    }
-
-    if (type === 'response.failed') {
-        const responseObj = parsed.response as Record<string, unknown> | undefined;
-        const error = responseObj?.error as Record<string, unknown> | undefined;
-        const message = (error?.message as string | undefined) ?? 'response.failed';
-        throw new Error(`ChatGPT response failed: ${message}`);
-    }
-
-    // Other events (response.created, .in_progress, .output_item.added for messages, etc.)
-    // are ignored. Add handlers as the schema reveals them.
-}
-
-function* finalizeToolCall(state: ToolCallState): Generator<ApiStreamChunk> {
-    if (!state.callId || !state.name) {
-        console.warn('[ChatGptOAuth] Skipping incomplete tool_call', state);
-        return;
-    }
-    let input: Record<string, unknown> = {};
-    try {
-        input = state.argsJson.trim() ? JSON.parse(state.argsJson) as Record<string, unknown> : {};
-    } catch (e) {
-        // BUG-032: tool_error so AgentTask records the failure and breaks the loop.
-        yield {
-            type: 'tool_error',
-            id: state.callId,
-            name: state.name,
-            error: truncatedToolInputError(state.name, (e as Error).message),
-        };
-        return;
-    }
-    yield { type: 'tool_use', id: state.callId, name: state.name, input };
-}
-
-function num(v: unknown): number | undefined {
-    return typeof v === 'number' ? v : undefined;
 }

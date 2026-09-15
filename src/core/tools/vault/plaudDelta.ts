@@ -81,3 +81,26 @@ export function computePlaudDelta(
         scanned_ids: existingIds.size,
     };
 }
+
+/**
+ * A recording's length as "m:ss", for the human-readable pick line the user
+ * chooses from.
+ *
+ * Plaud reports `duration` in MILLISECONDS. That is not a guess: list_files
+ * answered 7925000 for a recording that runs 2h12m05s when checked against the
+ * live server on 2026-09-02. Read as seconds it rendered "132083:20", which is
+ * not merely ugly -- it also disabled the skill's own rule of thumb that a
+ * recording under ~30 seconds is almost always a misfire, because no misfire
+ * could ever look short.
+ *
+ * Minutes are not rolled into hours on purpose: the pick line stays sortable
+ * and a two-hour meeting reads as "132:05", which is what the list has always
+ * shown.
+ */
+export function fmtDuration(milliseconds: number): string {
+    if (!milliseconds || milliseconds < 0) return '0:00';
+    const totalSeconds = Math.floor(milliseconds / 1000);
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}

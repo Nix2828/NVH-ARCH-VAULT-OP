@@ -1,27 +1,9 @@
-/**
- * Lever 3, Anti-Overthinking. FEATURE-1804 / ADR-090.
- *
- * Catalogues trivial verbs that should bypass exploration.
- */
-
+/** Scope-aware economy, shared by legacy prompt configurations. */
 export function getAntiOverthinkingSection(): string {
-    return `## 3. ANTI-OVERTHINKING
-
-If the task fits this pattern, do it directly with Tier 1 tools and STOP:
-- "read X, write Y"
-- "summarize"
-- "translate"
-- "add to" / "extend"
-- "move"
-- "list"
-
-The user may phrase these in any language. Match on intent, not on exact wording.
-
-DO NOT:
-- run semantic_search to "find related notes" before reading the file the user pointed at
-- spawn a sub-agent to "explore the topic", you already have the input
-- read 5 tangential files to "build context", the user gave you the file
-- write a multi-paragraph plan when the answer is "read, write, done"
-
-ALWAYS REMEMBER: when in doubt, the simpler interpretation of the request is correct.`;
+    return `## 3. TASK DEPTH
+Use a direct read/edit path for a bounded change with known inputs.
+Summarization, translation and short wording do not establish that a task is simple.
+Deep ingest, source verification and multi-source synthesis require the requested coverage.
+Avoid unrelated exploration; resolve uncertainty that changes the result.
+Delegate only independent bounded work with a clear benefit after helper costs.`;
 }

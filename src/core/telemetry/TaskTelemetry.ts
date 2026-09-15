@@ -95,6 +95,11 @@ export interface CondenseTelemetryEntry {
     startedAt: string;
     durationMs: number;
     success: boolean;
+    outcome?: 'applied' | 'skipped' | 'failed';
+    reason?: string;
+    candidateTokens?: number;
+    reducibleTokens?: number;
+    retainedTokens?: number;
     prevTokens: number;
     newTokens: number;
     savedTokens: number;
@@ -156,6 +161,8 @@ export interface RequestTelemetryEntry {
     historyMessages: number;
     /** Tool schemas sent with this request */
     toolsSent: number;
+    /** Exact ordered schema hash; absent on legacy records. */
+    toolsSchemaHash?: string;
     /** tool_result blocks microcompaction pruned since the previous request */
     prunedBlocksThisTurn: number;
     /** A condense (rolling summary or full) ran since the previous request */

@@ -30,3 +30,20 @@ export function splitToolBatch<T extends { name: string }>(
         sequentialRest: toolUses.slice(prefixLen),
     };
 }
+
+
+/** Read waves separated by exclusive barriers, with bounded fanout. */
+export function groupToolBatch<T extends { name: string }>(
+    toolUses: readonly T[], parallelSafe: ReadonlySet<string>, concurrency = 4,
+): T[][] {
+    const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 4;
+    const groups: T[][] = [];
+    let reads: T[] = [];
+    const flush = (): void => { if (reads.length) { groups.push(reads); reads = []; } };
+    for (const tool of toolUses) {
+        if (!parallelSafe.has(tool.name)) { flush(); groups.push([tool]); }
+        else { reads.push(tool); if (reads.length >= limit) flush(); }
+    }
+    flush();
+    return groups;
+}

@@ -24,7 +24,9 @@ import type { ModeConfig, CustomModel } from '../types/settings';
 import type { McpClient } from './mcp/McpClient';
 import { BUILT_IN_MODES } from './modes/builtinModes';
 import { TOOL_METADATA } from './tools/toolMetadata';
-import { PROGRESSIVE_DISCLOSURE_META_TOOLS } from './tools/toolEffects';
+import { WorkJournal, createWorkJournal } from './agent/WorkJournal';
+import { createJournalVerification } from './tools/agent/JournalVerificationHost';
+import { PROGRESSIVE_DISCLOSURE_META_TOOLS, resolveToolEffect } from './tools/toolEffects';
 import { sanitizeAndLog } from './utils/sanitizeHistoryForApi';
 import { logInputBreakdown } from './utils/logInputBreakdown';
 import { microcompactToolResults, shouldDeferMicrocompact } from './context/MicroCompactor';
@@ -35,7 +37,7 @@ import { InflightStore } from './agent/InflightStore';
 import { TokenEstimator } from './context/TokenEstimator';
 import { stripPrunedForCondense } from './context/stripPrunedForCondense';
 import { filterShadowedBuiltins } from './tools/shadowedByPlugin';
-import { isDeferredTool } from './tools/toolMetadata';
+import { initialToolsForTask, isDeferredTool } from './tools/toolMetadata';
 import { getSubagentProfile } from './agent/subagent-profiles';
 import { decideLoopErrorAction } from './agent/loopErrorPolicy';
 import {
@@ -71,6 +73,8 @@ import { expandProviderConfigsToCustomModels } from './settings/expandProviderCo
 import { CompositionStackService } from './skills/CompositionStackService';
 import { getPerformanceMarks } from './observability/PerformanceMarks';
 import {
+    minimumCondenseGain,
+    CONDENSE_SYSTEM_PROMPT,
     DEFAULT_CONDENSING_ENABLED,
     DEFAULT_CONDENSING_THRESHOLD,
     DEFAULT_MICROCOMPACTION_ENABLED,
@@ -95,6 +99,11 @@ export interface CondenseTelemetryEvent {
     durationMs: number;
     /** True when the splice ran; false on early-skip or helper-api failure. */
     success: boolean;
+    outcome?: 'applied' | 'skipped' | 'failed';
+    reason?: string;
+    candidateTokens?: number;
+    reducibleTokens?: number;
+    retainedTokens?: number;
     /** Estimated history tokens BEFORE the splice (always recorded). */
     prevTokens: number;
     /** Estimated history tokens AFTER the splice (only meaningful on success). */
@@ -841,6 +850,7 @@ export class AgentTask {
         systemPrompt: string;
         historyMessages: number;
         toolsSent: number;
+        toolSchemaJson?: string;
         delta: { input: number; output: number; cacheRead: number; cacheCreation: number };
     }): void {
         const hook = this.taskCallbacks.onRequestTelemetry;
@@ -868,6 +878,7 @@ export class AgentTask {
                 cacheCreationTokens: args.delta.cacheCreation,
                 historyMessages: args.historyMessages,
                 toolsSent: args.toolsSent,
+                toolsSchemaHash: args.toolSchemaJson === undefined ? undefined : hashForTelemetry(args.toolSchemaJson),
                 prunedBlocksThisTurn: pruned,
                 condensedThisTurn: condensed,
                 steeringInjected: steering,
@@ -1018,6 +1029,10 @@ export class AgentTask {
         // snapshot by the time we get here, so there is nothing left to refuse
         // in favour of.
         const loopState = initLoopStateForRun(config.resumeState, this.maxIterations);
+        const getWorkJournal = (): WorkJournal => {
+            loopState.workJournal ??= createWorkJournal();
+            return new WorkJournal(loopState.workJournal);
+        };
 
         // FEAT-32-02 PR 2.2: hoisted detector so FastPath can feed it via
         // `recordForEpisodeOnly` BEFORE the main loop opens. Originally
@@ -1408,7 +1423,7 @@ export class AgentTask {
         // FEATURE-1600 (Deferred Tool Loading): tools that the LLM activated
         // via find_tool during this session. Injected into the prompt cache
         // until the task ends.
-        const activatedDeferredTools = new Set<string>();
+        const activatedDeferredTools = new Set(initialToolsForTask(typeof userMessage === 'string' ? userMessage : ''));
 
         // EPIC-26 / FEAT-26-01 / ADR-120: reminder is rebuilt as part of the
         // prompt cache. The closure captures the current value of
@@ -1420,6 +1435,7 @@ export class AgentTask {
                 getAdvisorModel?: () => unknown;
             }).getAdvisorModel?.();
             cachedSystemPrompt = buildSystemPromptForMode({
+                compactHarness: true,
                 mode: activeMode,
                 globalCustomInstructions,
                 includeTime,
@@ -1466,7 +1482,7 @@ export class AgentTask {
             // FEATURE-1600: by default hide deferred tools from the prompt.
             // The LLM can activate them via find_tool, which adds them to
             // activatedDeferredTools and invalidates the cache.
-            cachedTools = baseTools.filter((t) => !isDeferredTool(t.name));
+            cachedTools = baseTools.filter((t) => !isDeferredTool(t.name)).sort((a, b) => a.name.localeCompare(b.name));
 
             // Inject activated deferred tools (if any were unlocked via find_tool).
             for (const name of activatedDeferredTools) {
@@ -1789,6 +1805,8 @@ export class AgentTask {
                         yield chunk;
                     }
                 })();
+                const continuationTokens = safeHistory.reduce((sum, m) =>
+                    sum + (this.api.estimateProviderStateTokens?.(m.providerState) ?? 0), 0);
                 const streamResult = await this.loopEngine.consumeStream(markedStream, loopState, {
                     onText: (text) => this.taskCallbacks.onText(text),
                     onThinking: (text) => this.taskCallbacks.onThinking?.(text),
@@ -1797,7 +1815,7 @@ export class AgentTask {
                     onUsage: (inputTokens, outputTokens, cacheRead, cacheCreation, servingModelId) => {
                         // IMP-41-01-04: calibrate chars-per-token from the real
                         // prompt size (input + cache segments = full prompt).
-                        this.tokenEstimator.recordUsage(requestChars, inputTokens + cacheRead + cacheCreation);
+                        this.tokenEstimator.recordUsage(requestChars, inputTokens + cacheRead + cacheCreation - continuationTokens);
                         // FIX-24-05-05: attribute at chunk time -- TaskRouter
                         // escalation swaps this.api mid-loop, so the model
                         // serving THIS iteration is the one to bill.
@@ -1839,6 +1857,7 @@ export class AgentTask {
                     systemPrompt,
                     historyMessages: safeHistory.length,
                     toolsSent: tools.length,
+                    toolSchemaJson: JSON.stringify(tools),
                     delta: {
                         input: loopState.totalInputTokens - usageBefore.input,
                         output: loopState.totalOutputTokens - usageBefore.output,
@@ -1882,7 +1901,9 @@ export class AgentTask {
                         text: '[Response truncated: output-token limit reached during reasoning; no visible output was produced.]',
                     });
                 }
-                history.push({ role: 'assistant', content: assistantContent });
+                history.push({ role: 'assistant', content: assistantContent,
+                    ...(streamResult.providerState ? { providerState: streamResult.providerState } : {}),
+                });
 
                 // If no tool calls, the LLM is done — run condensing on text-only turns
                 if (toolUses.length === 0) {
@@ -1958,6 +1979,7 @@ export class AgentTask {
                         abortSignal,
                         askQuestion,
                         signalCompletion,
+                        getWorkJournal,
                         switchMode,
                         // Depth-guard: only wire spawnSubtask if this child is allowed to spawn
                         spawnSubtask: childCanSpawn ? spawnSubtask : undefined,
@@ -1978,6 +2000,9 @@ export class AgentTask {
                         readFiles,
                         attachmentTexts,
                     });
+                    if (loopState.workJournal && !['read', 'ui', 'web'].includes(resolveToolEffect(toolUse.name, toolUse.input) ?? 'unknown')) {
+                        getWorkJournal().invalidateFiles();
+                    }
                     // FIX-COMPACT-01: record both outcomes in the ledger so the
                     // post-condense agent sees failures explicitly instead of
                     // re-attempting an approach the summarizer paraphrased away.
@@ -2074,7 +2099,6 @@ export class AgentTask {
                 // everything the run streamed; also keep the last-resort
                 // fallback for models that skip text streaming entirely.
                 if (loopState.completionResult !== null) {
-                    this.taskCallbacks.onAttemptCompletion?.();
                     const resultText = loopState.completionResult.trim();
                     if (resultText && (!loopState.hasStreamedText || resultText.length > loopState.streamedTextChars)) {
                         // Consumers append every onText chunk verbatim, so after
@@ -2206,6 +2230,18 @@ export class AgentTask {
             //   IS a successful turn from the user's POV.
             // - everything else at the success-exit (iteration cap hit,
             //   hard-limit recovery firing) -> abandon.
+            // Local final verification never starts a corrective model round.
+            // A failed contract is reported as incomplete, including text-only exits.
+            const verificationIssue = loopState.workJournal
+                ? await createJournalVerification(this.toolRegistry.plugin, getWorkJournal()).completionIssue()
+                : undefined;
+            if (verificationIssue) {
+                const warning = `\n\n[Verification incomplete] ${verificationIssue}`;
+                this.taskCallbacks.onText(warning);
+                history.push({ role: 'assistant', content: warning });
+            } else if (loopState.attemptCompletionFired) {
+                this.taskCallbacks.onAttemptCompletion?.();
+            }
             const hitIterationCap = loopState.telemetryIterations >= MAX_ITERATIONS;
             const productiveToolWork = repetitionDetector.getToolSequence().length > 0;
             loopState.cleanNaturalExit =
@@ -2214,9 +2250,10 @@ export class AgentTask {
                 && productiveToolWork
                 && loopState.totalToolErrors === 0
                 && loopState.consecutiveMistakes === 0
-                && !hitIterationCap;
+                && !hitIterationCap
+                && !verificationIssue;
             loopState.turnOutcome =
-                (loopState.completionResult !== null || loopState.cleanNaturalExit)
+                !verificationIssue && (loopState.completionResult !== null || loopState.cleanNaturalExit)
                     ? 'accept'
                     : 'abandon';
 
@@ -2499,7 +2536,7 @@ export class AgentTask {
         // chars-per-token factor (default 4.0 = legacy parity); structural
         // surcharges (tool_use plumbing, images) stay fixed.
         const toTokens = (chars: number): number => this.tokenEstimator.tokensForChars(chars);
-        let count = 0;
+        let count = this.api.estimateProviderStateTokens?.(m.providerState) ?? 0;
         if (Array.isArray(m.content)) {
             for (const block of m.content) {
                 if (block.type === 'text' && 'text' in block && typeof block.text === 'string') {
@@ -2572,19 +2609,26 @@ export class AgentTask {
      */
     private async condenseHistory(
         history: MessageParam[],
-        systemPrompt: string,
+        _systemPrompt: string,
         abortSignal?: AbortSignal,
         toolCallLedger?: string,
         maxTailTokens: number = 10_000,
     ): Promise<boolean> {
-        // Need at least first + 4 tail + some middle to condense
-        if (history.length < 7) return false;
-
         // FIX-COMPACT-07: telemetry start. The event fires from a single
         // `emit()` helper at every exit path so we cannot forget a branch.
         const telemetryStartedAt = new Date().toISOString();
         const telemetryStartMs = Date.now();
         const telemetryPrevTokens = this.estimateTokens(history);
+
+        if (history.length < 7) {
+            this.taskCallbacks.onCondenseTelemetry?.({
+                startedAt: telemetryStartedAt, durationMs: Date.now() - telemetryStartMs,
+                success: false, outcome: 'skipped', reason: 'history_too_short',
+                prevTokens: telemetryPrevTokens, newTokens: telemetryPrevTokens, savedTokens: 0,
+                helperModelUsed: false, modelId: this.api.getModel().id, maxTailTokens,
+            });
+            return false;
+        }
 
         const firstMsg = history[0];
 
@@ -2681,7 +2725,6 @@ export class AgentTask {
         // After boundary adjustments, toSummarize might be too small to condense
         if (toSummarize.length < 3) {
             console.debug('[AgentTask] toSummarize too small after boundary fix — skipping condensing');
-            this.condensedSinceLastRequest = true; // FEAT-24-11
             this.taskCallbacks.onCondenseTelemetry?.({
                 startedAt: telemetryStartedAt,
                 durationMs: Date.now() - telemetryStartMs,
@@ -2692,7 +2735,38 @@ export class AgentTask {
                 helperModelUsed: false,
                 modelId: this.api.getModel().id,
                 maxTailTokens,
+                outcome: 'skipped', reason: 'boundary_too_small',
                 errorMessage: 'toSummarize too small after boundary fix',
+            });
+            return false;
+        }
+
+        // Keep user instructions verbatim. Tool results are not user steering.
+        // Oversized retained user material deliberately reduces the available
+        // gain; the preflight below avoids paying for an impossible reduction.
+        const userInstructions = toSummarize.slice(1)
+            .filter(m => m.role === 'user')
+            .map(m => typeof m.content === 'string' ? m.content
+                : m.content.map(b => b.type === 'text' ? b.text : '').filter(Boolean).join('\n'))
+            .filter(Boolean);
+        // Retain exact references independently of the helper's prose. These
+        // are evidence locators, not verified claims or executable instructions.
+        const sourceReferences = [...new Set(toSummarize.flatMap(message => {
+            const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+            return text.match(/\[\[[^\]\n]+\]\]|\[[^\]\n]+\]\([^\s)]+\)|https?:\/\/[^\s"<>\\)\]]+|[\w./%-]+#(?:\^[\w-]+|page=\d+)|\^[A-Za-z0-9_-]+/g) ?? [];
+        }))].join('\n');
+        const retainedTokens = this.estimateTokens([firstMsg, ...tail])
+            + Math.ceil(userInstructions.join('\n').length / 4)
+            + Math.ceil(sourceReferences.length / 4)
+            + Math.ceil(this.fileDossier.render().length / 4);
+        const reducibleTokens = telemetryPrevTokens - retainedTokens;
+        if (reducibleTokens < minimumCondenseGain(telemetryPrevTokens) + 512) {
+            this.taskCallbacks.onCondenseTelemetry?.({
+                startedAt: telemetryStartedAt, durationMs: Date.now() - telemetryStartMs,
+                success: false, outcome: 'skipped', reason: 'insufficient_region',
+                prevTokens: telemetryPrevTokens, newTokens: telemetryPrevTokens, savedTokens: 0,
+                helperModelUsed: false, modelId: this.api.getModel().id, maxTailTokens,
+                retainedTokens, reducibleTokens,
             });
             return false;
         }
@@ -2710,7 +2784,8 @@ export class AgentTask {
         const condensingInstruction =
             'Summarize this conversation compactly. Preserve:\n' +
             '- The original task and goal\n' +
-            '- Key decisions made\n' +
+            '- Key decisions made, latest user corrections and ALL unfinished requests\n' +
+            '- Exact source paths, URLs, block/page anchors and contradictions\n' +
             // IMP-41-03-06: per-file detail lives in the deterministic FILE
             // DOSSIER appended after the summary -- the narrative should focus
             // on decisions and open steps instead of re-listing file contents.
@@ -2722,7 +2797,7 @@ export class AgentTask {
             '- Search queries performed and their result summaries\n' +
             '- Errors encountered and how they were resolved\n\n' +
             (toolCallLedger ? toolCallLedger + '\n\n' : '') +
-            'IMPORTANT: After condensing, the agent MUST NOT repeat tool calls listed above.\n\n' +
+            'Reuse valid results. Reread when source content, revisions or evidence are missing.\n\n' +
             'Output only the summary — no preamble or meta-commentary.';
 
         // Build the message list for the condensing API call.
@@ -2756,13 +2831,13 @@ export class AgentTask {
             // BUG-017: condensing has its own pairing-fix higher up, but apply
             // the generic sanitize as well so any new edge case is caught.
             const safeCondensingMessages = sanitizeAndLog(strippedCondensingMessages, 'condensing');
-            logInputBreakdown('condensing', systemPrompt, safeCondensingMessages, []);
+            logInputBreakdown('condensing', CONDENSE_SYSTEM_PROMPT, safeCondensingMessages, []);
             // FEAT-24-07 / ADR-115: route condensing through the optional helper model.
             const condensingApi = getHelperApi(this.toolRegistry.plugin, this.api);
             helperModelUsed = condensingApi !== this.api;
             condensingModelId = condensingApi.getModel().id;
             for await (const chunk of condensingApi.createMessage(
-                systemPrompt,
+                CONDENSE_SYSTEM_PROMPT,
                 safeCondensingMessages,
                 [],
                 abortSignal,
@@ -2795,7 +2870,6 @@ export class AgentTask {
             const err = e instanceof Error ? e : new Error(String(e));
             console.warn('[AgentTask] Context condensing failed (history unchanged):', err.message);
             this.taskCallbacks.onContextCondenseFailed?.(err);
-            this.condensedSinceLastRequest = true; // FEAT-24-11
             this.taskCallbacks.onCondenseTelemetry?.({
                 startedAt: telemetryStartedAt,
                 durationMs: Date.now() - telemetryStartMs,
@@ -2806,6 +2880,7 @@ export class AgentTask {
                 helperModelUsed,
                 modelId: condensingModelId,
                 maxTailTokens,
+                outcome: 'failed', reason: 'helper_error',
                 errorMessage: err.message.slice(0, 500),
             });
             return false;
@@ -2814,7 +2889,6 @@ export class AgentTask {
         if (!summary.trim()) {
             console.warn('[AgentTask] Context condensing produced empty summary; history unchanged');
             this.taskCallbacks.onContextCondenseFailed?.(new Error('empty summary from helper API'));
-            this.condensedSinceLastRequest = true; // FEAT-24-11
             this.taskCallbacks.onCondenseTelemetry?.({
                 startedAt: telemetryStartedAt,
                 durationMs: Date.now() - telemetryStartMs,
@@ -2825,40 +2899,37 @@ export class AgentTask {
                 helperModelUsed,
                 modelId: condensingModelId,
                 maxTailTokens,
+                outcome: 'failed', reason: 'empty_summary',
                 errorMessage: 'empty summary from helper API',
             });
             return false;
         }
 
-        // IMP-41-03-04: forensic snapshot of the history as it looked BEFORE
-        // the rewrite (bounded 3 generations, deep-copied).
+        const candidate: MessageParam[] = [firstMsg, {
+            role: 'assistant', content: [{ type: 'text',
+                text: `[Conversation Summary]\n\n${summary.trim()}`
+                    + (sourceReferences ? `\n\n[Retained source references; verify claims against sources]\n${sourceReferences}` : '')
+                    + (this.fileDossier.render() ? `\n\n${this.fileDossier.render()}` : ''),
+            }],
+        }, {
+            role: 'user', content: '[Context condensed. Continue all open requests.]'
+                + (userInstructions.length ? `\n\n[User instructions, chronological and verbatim]\n${userInstructions.join('\n\n')}` : ''),
+        }, ...tail];
+        const candidateTokens = this.estimateTokens(candidate);
+        if (preTokens - candidateTokens < minimumCondenseGain(preTokens)) {
+        this.taskCallbacks.onCondenseTelemetry?.({
+                startedAt: telemetryStartedAt, durationMs: Date.now() - telemetryStartMs,
+                success: false, outcome: 'skipped', reason: 'insufficient_gain',
+                prevTokens: preTokens, newTokens: preTokens, savedTokens: 0,
+                helperModelUsed, modelId: condensingModelId, maxTailTokens,
+                candidateTokens, retainedTokens, reducibleTokens,
+            });
+            return false;
+        }
         this.condenseForensics.recordGeneration(
-            `pre-condense ${new Date().toISOString()} (${preMessageCount} msgs, ~${preTokens}t)`,
-            history,
+            `pre-condense ${new Date().toISOString()} (${preMessageCount} msgs, ~${preTokens}t)`, history,
         );
-
-        // Splice history in-place
-        history.splice(
-            0,
-            history.length,
-            firstMsg,
-            {
-                role: 'assistant',
-                // IMP-41-03-06: two-level summary -- the LLM narrative plus the
-                // DETERMINISTIC per-file dossier (no hallucination risk), so the
-                // model stops re-reading files the flat summary paraphrased away.
-                content: [{
-                    type: 'text',
-                    text: `[Conversation Summary]\n\n${summary.trim()}`
-                        + (this.fileDossier.render() ? `\n\n${this.fileDossier.render()}` : ''),
-                }],
-            },
-            {
-                role: 'user',
-                content: '[Context condensed to save space. Continue the task from here.]',
-            },
-            ...tail,
-        );
+        history.splice(0, history.length, ...candidate);
 
         // Post-condensing logging
         const postMessageCount = history.length;
@@ -2890,7 +2961,8 @@ export class AgentTask {
             this.taskCallbacks.onCondenseTelemetry?.({
             startedAt: telemetryStartedAt,
             durationMs: Date.now() - telemetryStartMs,
-            success: true,
+            success: true, outcome: 'applied',
+            candidateTokens, retainedTokens, reducibleTokens,
             prevTokens: preTokens,
             newTokens: postTokens,
             savedTokens: Math.max(0, preTokens - postTokens),

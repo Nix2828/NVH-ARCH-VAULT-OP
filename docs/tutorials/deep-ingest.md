@@ -24,6 +24,8 @@ Now the same flow, step by step, with what you see and what to do.
 
 Drag the source into the chat. PDF, DOCX, PPTX, XLSX, or a Markdown file already in the vault all work. If you drag a file from outside the vault, Vault Operator saves it to your attachment folder first and points the agent at the vault path.
 
+Sending waits for an attachment that is still being processed. Skills that need your configured attachment and new-note folders receive those paths from the plugin. If the settings cannot be resolved, the agent asks you to choose a destination.
+
 Ask for the deep path in plain language: "Deep-ingest this paper" or "Do a deep ingest of this PDF into my Sources folder". The agent calls `ingest_triage` and shows the triage card. The card includes:
 
 - Cluster match, tension hint, source diversity, recommendation.

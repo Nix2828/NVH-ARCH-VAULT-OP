@@ -41,10 +41,11 @@ export function getToolsSection(
     // intersection of this allowlist and the mode tool groups. Used by
     // subagent profile spawns to keep the subagent's tool surface tiny.
     subagentAllowedTools?: string[],
+    compactDirectory = false,
 ): string {
     const parts: string[] = [
         '====', '', 'TOOLS', '',
-        'You have access to these tools. Use them proactively -- do not guess at file contents or vault structure.', '',
+        'Inspect files and vault structure using tools.', '',
     ];
 
     // Generate non-MCP tool descriptions from central metadata.
@@ -53,10 +54,10 @@ export function getToolsSection(
     let nonMcpGroups = toolGroups.filter((g) => g !== 'mcp');
     if (!webEnabled && nonMcpGroups.includes('web')) {
         nonMcpGroups = nonMcpGroups.filter((g) => g !== 'web');
-        parts.push('**Web:** Disabled. When the user asks for internet search, the ONLY reason is webTools.enabled=false. Ask the user for permission first: "Web search is currently disabled. Shall I enable it?" If they agree, call update_settings(action:"set", path:"webTools.enabled", value:true), then use web_search. Do NOT enable without asking. Do NOT mention API keys or providers -- that is handled at runtime. Do NOT fall back to vault search.\n');
+        parts.push('**Web:** Disabled. Ask before enabling via update_settings(action:"set", path:"webTools.enabled", value:true); wait for approval, then use web_search. Do not substitute vault search for web research. Setup is handled at runtime.\n');
     }
     if (nonMcpGroups.length > 0) {
-        parts.push(buildToolPromptSection(nonMcpGroups, includeExamples, subagentAllowedTools));
+        parts.push(buildToolPromptSection(nonMcpGroups, includeExamples, subagentAllowedTools, compactDirectory));
     }
 
     // MCP tools: dynamic listing from connected servers when available

@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "Dem Nutzer eine Rückfrage stellen",
     "tool.attempt_completion": "Aufgabe abschließen",
     "tool.attempt_completion.desc": "Signalisieren, dass die Aufgabe erledigt ist",
+    "tool.work_journal": "Arbeitsbelege",
+    "tool.work_journal.desc": "Hypothesen festhalten und Ergebnisse lokal prüfen",
     "tool.update_todo_list": "Todos aktualisieren",
     "tool.update_todo_list.desc": "Eine Aufgaben-Checkliste im Chat anzeigen",
     "tool.new_task": "Sub-Agent starten",

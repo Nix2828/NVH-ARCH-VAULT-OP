@@ -20,11 +20,12 @@ import type ObsidianAgentPlugin from '../../../main';
 import { validateVaultRelativePath } from './pathValidation';
 import { atomicAdapterWrite } from '../../utils/atomicAdapterWrite';
 import { refreshOpenMarkdownViewsFor } from '../../utils/refreshMarkdownView';
-import { buildMeetingNoteFromBlocks, plaudIdFromResource, type MeetingFrontmatter, type PlaudBlock } from './meetingNoteFromSink';
+import { buildMeetingNoteFromPages, plaudIdFromResource, type MeetingFrontmatter } from './meetingNoteFromSink';
 
 interface BuildMeetingNoteInput {
     sink_path: string;
     note_path: string;
+    extra_sink_paths?: string[];
     frontmatter?: MeetingFrontmatter;
     delete_sink?: boolean;
 }
@@ -41,19 +42,27 @@ export class BuildMeetingNoteFromSinkTool extends BaseTool<'build_meeting_note_f
         return {
             name: 'build_meeting_note_from_sink',
             description:
-                'Turn a sinked Plaud get_transcript JSON file into a raw meeting note, natively (no sandbox write-rate or heap limit, transcript never enters the LLM). ' +
+                'Turn sinked Plaud get_transcript JSON file(s) into a raw meeting note, natively (no sandbox write-rate or heap limit, transcript never enters the LLM). ' +
                 'Decodes the transaction segments, merges consecutive same-speaker turns, and writes a note with OKF frontmatter, a horizontal rule, and the transcript as "**Speaker N:** Text" under a "## Transkript" heading. No summary placeholders. ' +
-                'Speaker labels stay raw; naming and any summary happen later via the meeting-summary skill. Used by the plaud-meeting-delta-ingest skill; safe to call once per recording in a batch.',
+                'get_transcript pages at 500 segments per call, so a long recording arrives as several sinks: pass the first as sink_path and the rest as extra_sink_paths, and this tool joins them in offset order. ' +
+                'It refuses to write when a page is missing (the last one still carries next_cursor, or the segments do not add up to total) rather than produce a silently truncated transcript. ' +
+                'Speaker labels stay raw; naming and any summary happen later via the meeting-summary skill. Used by the plaud-import skill; safe to call once per recording in a batch.',
             input_schema: {
                 type: 'object',
                 properties: {
                     sink_path: {
                         type: 'string',
-                        description: 'Vault path of the sinked get_transcript JSON file (e.g. "Inbox/.plaud-sink-{id}.json").',
+                        description: 'Vault path of the first sinked get_transcript page (e.g. "Inbox/.plaud-sink-{id}-p1.json").',
                     },
                     note_path: {
                         type: 'string',
                         description: 'Target note path (e.g. "Inbox/{title}.md").',
+                    },
+                    extra_sink_paths: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description:
+                            'Follow-up pages of the SAME recording, fetched via next_cursor and each sinked to its own file. Order does not matter (pages are sorted by their offset). Omit for a recording that fits in one page.',
                     },
                     frontmatter: {
                         type: 'object',
@@ -71,45 +80,70 @@ export class BuildMeetingNoteFromSinkTool extends BaseTool<'build_meeting_note_f
     }
 
     async execute(input: Record<string, unknown>, context: ToolExecutionContext): Promise<void> {
-        const { sink_path, note_path, frontmatter, delete_sink } = input as unknown as BuildMeetingNoteInput;
+        const { sink_path, note_path, extra_sink_paths, frontmatter, delete_sink } = input as unknown as BuildMeetingNoteInput;
         const { callbacks } = context;
 
         try {
             if (!sink_path) throw new Error('sink_path parameter is required');
             if (!note_path) throw new Error('note_path parameter is required');
 
-            const safeSink = validateVaultRelativePath(sink_path);
             const safeNote = validateVaultRelativePath(note_path);
-            if (!safeSink) throw new Error(`Invalid sink_path: ${sink_path}`);
             if (!safeNote) throw new Error(`Invalid note_path: ${note_path}`);
 
-            // Read the sink. The scratch file name starts with a dot
-            // (.plaud-sink-...), so it is not in the Obsidian index -- read via
+            // One recording can span several sinks: get_transcript pages at 500
+            // segments, so a long meeting arrives as sink_path plus the pages in
+            // extra_sink_paths. Every path is validated the same way -- the sinks
+            // are not only read but REMOVED below, so none of them may skip the
+            // path check (see the SEC note further down).
+            const rawExtra = Array.isArray(extra_sink_paths) ? extra_sink_paths : [];
+            const safeSinks: string[] = [];
+            for (const candidate of [sink_path, ...rawExtra]) {
+                if (typeof candidate !== 'string' || candidate.length === 0) {
+                    throw new Error(`Invalid sink path: ${String(candidate)}`);
+                }
+                const safe = validateVaultRelativePath(candidate);
+                if (!safe) throw new Error(`Invalid sink path: ${candidate}`);
+                if (!safeSinks.includes(safe)) safeSinks.push(safe);
+            }
+            // Read the sinks. The scratch file names start with a dot
+            // (.plaud-sink-...), so they are not in the Obsidian index -- read via
             // the adapter, which handles hidden paths.
             const adapter = this.app.vault.adapter;
-            if (!(await adapter.exists(safeSink))) {
-                throw new Error(`sink not found: ${safeSink}`);
-            }
-            const raw = await adapter.read(safeSink);
-
-            let blocks: PlaudBlock[];
-            try {
-                blocks = JSON.parse(raw) as PlaudBlock[];
-            } catch (e) {
-                throw new Error('sink is not valid JSON: ' + String(e));
+            const payloads: unknown[] = [];
+            for (const path of safeSinks) {
+                if (!(await adapter.exists(path))) {
+                    throw new Error(`sink not found: ${path}`);
+                }
+                const raw = await adapter.read(path);
+                try {
+                    payloads.push(JSON.parse(raw));
+                } catch (e) {
+                    throw new Error(`sink is not valid JSON (${path}): ` + String(e));
+                }
             }
 
             // Pure transform (throws with a clear message on the wrong shape,
-            // e.g. a get_note summary sinked by mistake).
+            // e.g. a get_note summary sinked by mistake, or a page set that is
+            // missing its tail).
             //
             // SEC 2026-07-25: this runs BEFORE the dedup branch on purpose. The
-            // dedup path deletes the sink, and until this reorder the only thing
+            // dedup path deletes the sinks, and until this reorder the only thing
             // standing between an arbitrary caller-named file and `adapter.remove`
             // was JSON.parse succeeding. Any parseable JSON file could be pointed
             // at via sink_path and destroyed by claiming an already-imported
             // recording id. Validating the Plaud block shape first means a file
-            // that is not a transcript sink can never reach the delete.
-            const result = buildMeetingNoteFromBlocks(blocks, frontmatter ?? {});
+            // that is not a transcript sink can never reach the delete. The same
+            // holds for every extra_sink_paths entry: they run through the same
+            // transform before anything is removed.
+            const result = buildMeetingNoteFromPages(payloads, frontmatter ?? {});
+
+            // Scratch cleanup, best effort, applied to EVERY page that was read.
+            const removeSinks = async (): Promise<void> => {
+                if (delete_sink === false) return;
+                for (const path of safeSinks) {
+                    try { await adapter.remove(path); } catch { /* best effort; a lingering hidden scratch file is harmless */ }
+                }
+            };
 
             // Hard dedup guarantee at the write point. The upstream delta scan
             // (search_files) is capped BY DESIGN -- 500 files, 50 hits, 1500 ms
@@ -124,10 +158,8 @@ export class BuildMeetingNoteFromSinkTool extends BaseTool<'build_meeting_note_f
             if (incomingId) {
                 const existingPath = this.findNoteWithPlaudId(incomingId, safeNote);
                 if (existingPath) {
-                    // Clean up the scratch sink so it does not linger, then skip.
-                    if (delete_sink !== false) {
-                        try { await adapter.remove(safeSink); } catch { /* best effort */ }
-                    }
+                    // Clean up the scratch sinks so they do not linger, then skip.
+                    await removeSinks();
                     callbacks.pushToolResult(
                         this.formatSuccess(
                             `Skipped: recording ${incomingId} is already imported at "${existingPath}". ` +
@@ -158,23 +190,18 @@ export class BuildMeetingNoteFromSinkTool extends BaseTool<'build_meeting_note_f
                 await this.app.vault.create(safeNote, result.body);
             }
 
-            // Delete the scratch sink (default true), best effort.
-            if (delete_sink !== false) {
-                try {
-                    await adapter.remove(safeSink);
-                } catch {
-                    /* best effort; the hidden scratch file is harmless if it lingers */
-                }
-            }
+            // Delete the scratch sinks (default true), best effort.
+            await removeSinks();
 
+            const pageNote = safeSinks.length > 1 ? ` from ${safeSinks.length} sinked pages` : '';
             callbacks.pushToolResult(
                 this.formatSuccess(
-                    `Built meeting note ${safeNote} from ${result.segmentCount} segments ` +
+                    `Built meeting note ${safeNote} from ${result.segmentCount} segments${pageNote} ` +
                     `(${result.speakerLines} speaker turns, ${result.transcriptChars} transcript chars). ` +
                     `Raw Speaker N labels kept; run meeting-summary for naming and interpretation.`,
                 ),
             );
-            callbacks.log(`Built meeting note ${safeNote} from sink ${safeSink}`);
+            callbacks.log(`Built meeting note ${safeNote} from sink(s) ${safeSinks.join(', ')}`);
         } catch (error) {
             callbacks.pushToolResult(this.formatError(error));
             await callbacks.handleError('build_meeting_note_from_sink', error);

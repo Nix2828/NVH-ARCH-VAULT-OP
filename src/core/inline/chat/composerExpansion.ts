@@ -15,6 +15,7 @@
  */
 
 import type ObsidianAgentPlugin from '../../../main';
+import { buildSkillStorageContext } from '../../skills/skillStorageContext';
 import {
     buildExplicitSkillInstructions,
     type RenderableSkill,
@@ -54,7 +55,8 @@ export async function expandComposerPrefix(
         // Inventar trägt (scripts/, references/, assets/, Sub-Rollen). Vorher
         // baute dieser Pfad den Block selbst und nannte nur den Body, also
         // erfuhr das Modell nie, dass der Skill Sidecars hat.
-        return buildExplicitSkillInstructions(matched, rest) + activeFileTail;
+        const storage = await buildSkillStorageContext(plugin.app, matched.body);
+        return storage + buildExplicitSkillInstructions(matched, rest) + activeFileTail;
     }
 
     if (prefix === '#') {

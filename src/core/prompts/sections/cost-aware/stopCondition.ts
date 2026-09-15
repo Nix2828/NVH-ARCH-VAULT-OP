@@ -1,15 +1,8 @@
-/**
- * Lever 9 -- Stop Condition. FEATURE-1804 / ADR-090.
- *
- * Mandatory reflection step after each tool result.
- */
-
+/** Completion is measured against the whole request and required evidence. */
 export function getStopConditionSection(): string {
-    return `## 6. STOP CONDITION (after every tool result, ask yourself)
-
-After each tool returns, before deciding the next action, internally answer:
-1. Do I now have the information I need to answer? **YES** -> write the answer, call attempt_completion, stop.
-2. **NO** -> what specific piece is still missing? Name it concretely. If you can't name it, the answer is YES and you're stalling.
-
-If your next instinct is "let me also check X just in case" -- that is stalling. Stop and answer.`;
+    return `## 6. STOP CONDITION
+After tool results, check the requested outcomes, user corrections and unfinished steps.
+Finish when the work and required evidence checks are complete.
+If evidence is missing, retrieve it or state the precise limitation. Never silently narrow scope.
+Reuse verified results; repeat a check only when new information or a changed source justifies it.`;
 }

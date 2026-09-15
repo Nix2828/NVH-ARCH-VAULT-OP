@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "Hacer al usuario una pregunta aclaratoria",
     "tool.attempt_completion": "Completar tarea",
     "tool.attempt_completion.desc": "Señalar que la tarea está terminada",
+    "tool.work_journal": "Evidencias de trabajo",
+    "tool.work_journal.desc": "Registrar hipótesis y verificar resultados localmente",
     "tool.update_todo_list": "Actualizar pendientes",
     "tool.update_todo_list.desc": "Mostrar una lista de tareas en el chat",
     "tool.new_task": "Lanzar subagente",

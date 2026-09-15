@@ -18,15 +18,7 @@ import { BaseTool } from '../BaseTool';
 import type { ToolDefinition, ToolExecutionContext } from '../types';
 import type ObsidianAgentPlugin from '../../../main';
 import { plaudIdFromResource } from './meetingNoteFromSink';
-import { computePlaudDelta, type PlaudFileMeta } from './plaudDelta';
-
-/** Seconds -> "m:ss" for the human-readable pick line. */
-function fmtDuration(seconds: number): string {
-    if (!seconds || seconds < 0) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${String(s).padStart(2, '0')}`;
-}
+import { computePlaudDelta, fmtDuration, type PlaudFileMeta } from './plaudDelta';
 
 export class ComputePlaudDeltaTool extends BaseTool<'compute_plaud_delta'> {
     readonly name = 'compute_plaud_delta' as const;

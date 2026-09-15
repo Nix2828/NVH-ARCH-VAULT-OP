@@ -22,6 +22,7 @@ import type { ToolDefinition, ToolExecutionContext } from '../types';
 import { TRUSTED_SKILL_TIERS } from '../../skills/SkillProvenanceStore';
 import { loadableSkills } from '../../context/SkillsManager';
 import { renderSkillInventory } from '../../skills/skillInventoryRenderer';
+import { buildSkillStorageContext } from '../../skills/skillStorageContext';
 import { isSkillEnabled } from '../../skills/skillToggleGate';
 import type ObsidianAgentPlugin from '../../../main';
 import type { SelfAuthoredSkillLoader, SelfAuthoredSkill } from '../../skills/SelfAuthoredSkillLoader';
@@ -90,7 +91,8 @@ export class ReadSkillTool extends BaseTool<'read_skill'> {
         // 1. Try self-authored / bundled skills (carries inventory + code modules).
         const selfAuthored = this.skillLoader?.getSkill(rawName);
         if (selfAuthored) {
-            callbacks.pushToolResult(this.formatSuccess(this.renderSelfAuthored(selfAuthored)));
+            const storage = await buildSkillStorageContext(this.plugin.app, selfAuthored.body);
+            callbacks.pushToolResult(this.formatSuccess(storage + this.renderSelfAuthored(selfAuthored)));
             return;
         }
 
@@ -123,8 +125,9 @@ export class ReadSkillTool extends BaseTool<'read_skill'> {
                 }
                 if (meta) {
                     const raw = await skillsManager.readFile(meta.path);
+                    const storage = await buildSkillStorageContext(this.plugin.app, raw);
                     callbacks.pushToolResult(
-                        this.formatSuccess(this.renderUserSkill(rawName, meta.description, raw)),
+                        this.formatSuccess(storage + this.renderUserSkill(rawName, meta.description, raw)),
                     );
                     return;
                 }

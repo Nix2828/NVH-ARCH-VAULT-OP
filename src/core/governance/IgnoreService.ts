@@ -247,10 +247,16 @@ export class IgnoreService {
      * real path from the skill NAME, so the agent never needs to know it.
      */
     getDenialReason(path: string): string {
+        const normalized = this.normalize(path);
+        const lower = IgnoreService.fold(normalized);
+        const configPath = lower === this.configDirLower || lower.startsWith(`${this.configDirLower}/`);
         const base = this.isProtected(path)
             ? `"${path}" is protected (.obsidian-agentprotected). Cannot write to protected files.`
-            : this.isIgnored(path)
-                ? `"${path}" is excluded (.obsidian-agentignore). Add it to the ignore list to allow access.`
+            : configPath
+                ? `"${path}" is excluded by host policy: the Obsidian configuration folder cannot be accessed by agent tools. `
+                    + 'Changing ignore rules cannot enable it. For skill storage folders, use the host settings supplied with the skill.'
+                : this.isIgnored(path)
+                ? `"${path}" is excluded by vault access rules or system policy. Do not infer which setting or ignore file caused this denial.`
                 : `"${path}" is blocked by system defaults.`;
 
         if (looksLikeSkillDefinitionPath(this.normalize(path))) {

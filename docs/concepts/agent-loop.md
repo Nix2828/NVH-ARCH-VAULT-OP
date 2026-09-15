@@ -9,7 +9,7 @@ A chatbot responds once. An agent loops. That distinction is the main thing to u
 
 When you send a message, Vault Operator passes it to the language model along with a system prompt and tool definitions. The model responds with text, tool calls, or both. If there are tool calls, Vault Operator executes them, appends the results to the conversation history, and sends everything back to the model. This repeats until the model responds with only text, calls `attempt_completion`, or a safety limit stops the loop.
 
-The entire loop lives in one file: `src/core/AgentTask.ts`.
+`src/core/AgentTask.ts` assembles the task, while `src/core/agent/AgentLoopEngine.ts` drives its iterations.
 
 ## The loop, visually
 
@@ -33,7 +33,7 @@ The assembled prompt and conversation history go to the AI provider. Vault Opera
 
 If the response contains tool calls, each one goes through `ToolExecutionPipeline` (`src/core/tool-execution/ToolExecutionPipeline.ts`). The pipeline validates paths, checks approval requirements, creates checkpoints before write operations, executes the tool, and logs the result. No tool bypasses this pipeline, not even MCP tools from external servers.
 
-Read-only tools from the parallel-safe set (`read_file`, `search_files`, `semantic_search` and a few more) run concurrently via `Promise.all()`. Write tools and control-flow tools run one at a time.
+Read-only tools from the parallel-safe set (`read_file`, `search_files`, `semantic_search` and a few more) run concurrently, with at most four in flight. Writes and control-flow tools form barriers, preserving their position in the requested sequence.
 
 The tool results go back into the conversation history as structured result blocks. The loop then sends the updated history to the model for the next iteration.
 
@@ -100,7 +100,7 @@ Context externalization intercepts large tool results before they enter the hist
 
 Temporary files live in `.vault-operator/cache/tmp/{taskId}/` with deterministic names (`{toolName}-{callIndex}.md`). No timestamps, no random values, so file paths don't invalidate the KV cache. Cleanup happens after task completion, with a safety sweep on plugin startup for orphaned directories older than one hour.
 
-During fast path execution, externalization is disabled. The final LLM call needs full content for a good summary, and with only two to three iterations the accumulation is minimal.
+Fast-path execution uses the same full-result and compact-history views. The full result remains available for summaries and later reads even when the history carries a shorter preview.
 
 The history is strictly append-only. Externalization happens at result creation time, never retroactively. KV caching and context condensing share this principle. Neither works if the history gets modified after the fact.
 

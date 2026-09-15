@@ -74,7 +74,7 @@ export class IframeSandboxExecutor implements ISandboxExecutor {
     private bridge: SandboxBridge;
     private messageHandler: ((event: MessageEvent) => void) | null = null;
 
-    constructor(private plugin: ObsidianAgentPlugin) {
+    constructor(private plugin: ObsidianAgentPlugin, private readonly bridgePolicy: 'full' | 'none' = 'full') {
         this.bridge = new SandboxBridge(plugin);
     }
 
@@ -91,7 +91,7 @@ export class IframeSandboxExecutor implements ISandboxExecutor {
      * and omit/forge the field). Exported for tests via a cast.
      */
     private isLiveBridgeRequest(execId: string | undefined): boolean {
-        return execId !== undefined && this.pending.has(execId);
+        return this.bridgePolicy === 'full' && execId !== undefined && this.pending.has(execId);
     }
 
     /**

@@ -16,6 +16,7 @@
 import type { MessageParam } from '../../api/types';
 import type { AgentLoopState, LoopPhase } from './LoopState';
 import { createInitialLoopState, ledgerDivergence, parseUsageLedger } from './LoopState';
+import { parseWorkJournal } from './WorkJournal';
 import { PerFileWriteQueue } from '../utils/perFileWriteQueue';
 
 export const INFLIGHT_FILE = 'inflight-tasks.json';
@@ -131,6 +132,9 @@ function validateLoopState(raw: unknown): LoopStateVerdict {
     const usage = parseUsageLedger(r.usage);
     if (!usage) return { rejected: 'the usage ledger holds a record that is not a valid token booking' };
     out.usage = usage;
+    try {
+        if (r.workJournal !== undefined) out.workJournal = parseWorkJournal(r.workJournal);
+    } catch { return { rejected: 'invalid work journal evidence' }; }
     // AUDIT-2026-08-27 L-3: the two halves have to describe the same moment.
     // Each was validated on its own and never against the other, so a file
     // written mid-drift (the snapshot site used to share the live ledger while

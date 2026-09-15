@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "向用户提出澄清问题",
     "tool.attempt_completion": "完成任务",
     "tool.attempt_completion.desc": "表示任务已完成",
+    "tool.work_journal": "工作验证记录",
+    "tool.work_journal.desc": "记录假设并在本地验证结果",
     "tool.update_todo_list": "更新待办",
     "tool.update_todo_list.desc": "在聊天中显示任务清单",
     "tool.new_task": "派生子 Agent",

@@ -14,9 +14,10 @@ import type { LLMProvider } from '../../types/settings';
 import type { ApiStreamChunk, MessageParam } from '../types';
 import { truncatedToolInputError } from '../types';
 import type { ToolDefinition } from '../../core/tools/types';
-import { modelSupportsTemperature } from '../../types/model-registry';
+import { modelSupportsTemperature, getModelEffortLevels, type EffortLevel } from '../../types/model-registry';
 import { stripCacheBreakpointMarker } from '../../core/systemPrompt';
 import { createLogger } from '../../core/observability/log';
+import { readReasoningItem, readResponsesContinuation, responsesScope, type ResponsesReasoningItem } from './responsesContinuation';
 
 const log = createLogger('Responses');
 
@@ -28,6 +29,7 @@ export interface ResponsesInputMessage {
     type: 'message';
     role: 'user' | 'assistant' | 'system';
     content: ResponsesContentBlock[];
+    phase?: 'commentary' | 'final_answer';
 }
 
 export interface ResponsesFunctionCallOutput {
@@ -43,7 +45,7 @@ export interface ResponsesFunctionCall {
     arguments: string;
 }
 
-export type ResponsesInputItem = ResponsesInputMessage | ResponsesFunctionCallOutput | ResponsesFunctionCall;
+export type ResponsesInputItem = ResponsesInputMessage | ResponsesFunctionCallOutput | ResponsesFunctionCall | ResponsesReasoningItem;
 
 export type ResponsesContentBlock =
     // IMP-18-01-04: `prompt_cache_breakpoint` marks the end of a reusable prompt
@@ -63,7 +65,7 @@ export interface ResponsesTool {
     parameters: Record<string, unknown>;
 }
 
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type ReasoningEffort = EffortLevel;
 
 /** The GPT-5 / o-series effort levels accepted on the Codex Responses surface. */
 const GPT_EFFORT_LEVELS: ReasoningEffort[] = ['minimal', 'low', 'medium', 'high'];
@@ -85,8 +87,9 @@ const GPT_EFFORT_LEVELS: ReasoningEffort[] = ['minimal', 'low', 'medium', 'high'
 export function resolveGptEffort(
     level: string | undefined,
     fallback: ReasoningEffort = 'low',
+    config?: LLMProvider,
 ): ReasoningEffort {
-    return asGptEffort(level) ?? fallback;
+    return asGptEffort(level, config) ?? fallback;
 }
 
 /**
@@ -95,8 +98,9 @@ export function resolveGptEffort(
  * level at all" cannot express it through the fallback parameter -- passing
  * undefined there triggers the default value instead.
  */
-export function asGptEffort(level: string | undefined): ReasoningEffort | undefined {
-    return GPT_EFFORT_LEVELS.find((valid) => valid === level);
+export function asGptEffort(level: string | undefined, config?: LLMProvider): ReasoningEffort | undefined {
+    const levels = config ? getModelEffortLevels(config.model, config.type) : GPT_EFFORT_LEVELS;
+    return levels.find((valid) => valid === level);
 }
 
 export interface ResponsesRequestBody {
@@ -122,18 +126,21 @@ export interface ResponsesRequestBody {
  * forked-kilocode/packages/types/src/providers/openai-codex.ts (supportsReasoningEffort matrix).
  */
 export function isGpt5Family(modelId: string): boolean {
-    return /^gpt-5(\b|[.-])/i.test(modelId);
+    return /^gpt-5(\b|[.-])/i.test(modelId) || /^gpt-6-astra(?:$|-)/i.test(modelId);
 }
 
 /** Convert internal MessageParam[] to Responses input items. */
-export function convertToResponsesInput(messages: MessageParam[]): ResponsesInputItem[] {
+export function convertToResponsesInput(messages: MessageParam[], scope?: string): ResponsesInputItem[] {
     const result: ResponsesInputItem[] = [];
 
     for (const msg of messages) {
+        const continuation = msg.role === 'assistant' ? readResponsesContinuation(msg.providerState, scope) : undefined;
+        if (continuation) result.push(...continuation.reasoning);
         if (typeof msg.content === 'string') {
             result.push({
                 type: 'message',
                 role: msg.role,
+                ...(continuation?.phase ? { phase: continuation.phase } : {}),
                 content: [
                     msg.role === 'assistant'
                         ? { type: 'output_text', text: msg.content }
@@ -157,6 +164,7 @@ export function convertToResponsesInput(messages: MessageParam[]): ResponsesInpu
                 result.push({
                     type: 'message',
                     role: 'assistant',
+                    ...(continuation?.phase ? { phase: continuation.phase } : {}),
                     content: [{ type: 'output_text', text: textParts }],
                 });
             }
@@ -246,7 +254,7 @@ export function prepareResponsesRequest(
         // chatgpt-oauth AND Copilot's /responses route (the gpt-5.6 lineup),
         // which together carried the sentinel on most of the logged traffic.
         instructions: stripCacheBreakpointMarker(systemPrompt),
-        input: convertToResponsesInput(messages),
+        input: convertToResponsesInput(messages, responsesScope(config)),
         stream: true,
         store: false,
     };
@@ -259,7 +267,7 @@ export function prepareResponsesRequest(
         // Default to 'low' (the documented 400-avoidance value); an explicit
         // user-chosen effort overrides it. Never derive medium/high without
         // an explicit user value -- the hardcoded low stays the floor.
-        body.reasoning = { effort: resolveGptEffort(config.reasoningEffort), summary: 'auto' };
+        body.reasoning = { effort: resolveGptEffort(config.reasoningEffort, 'low', config), summary: 'auto' };
         body.include = ['reasoning.encrypted_content'];
     }
     // FIX-04-03-02: omit temperature for default-only models (e.g. GPT-5.x)
@@ -288,10 +296,31 @@ interface ResponsesToolCallState {
  */
 export interface ResponsesStreamState {
     toolCalls: Map<string, ResponsesToolCallState>;
+    scope?: string;
+    reasoning: Map<string, ResponsesReasoningItem>;
+    phase?: 'commentary' | 'final_answer';
+    estimatedTokens?: number;
+    continuationDiscarded?: boolean;
 }
 
-export function createResponsesStreamState(): ResponsesStreamState {
-    return { toolCalls: new Map() };
+export function createResponsesStreamState(scope?: string): ResponsesStreamState {
+    return { toolCalls: new Map(), scope, reasoning: new Map() };
+}
+
+function retainContinuationItem(raw: unknown, state: ResponsesStreamState): void {
+    if (!state.scope || state.continuationDiscarded) return;
+    const item = readReasoningItem(raw);
+    if (item) state.reasoning.set(item.id, item);
+    if (state.reasoning.size > 100 || JSON.stringify([...state.reasoning.values()]).length > 1_000_000) {
+        state.reasoning.clear();
+        state.continuationDiscarded = true;
+        log.warn('Responses continuation exceeded its storage bound; continuing with visible history.');
+        return;
+    }
+    if (raw && typeof raw === 'object') {
+        const r = raw as Record<string, unknown>;
+        if (r.type === 'message' && (r.phase === 'commentary' || r.phase === 'final_answer')) state.phase = r.phase;
+    }
 }
 
 function num(v: unknown): number | undefined {
@@ -404,6 +433,7 @@ export function* responsesEventToChunks(
 
     if (type === 'response.output_item.done') {
         const item = event.item as Record<string, unknown> | undefined;
+        retainContinuationItem(item, state);
         if (item && item.type === 'function_call') {
             const key = toolCallKey(event, item);
             if (!key) return;
@@ -423,7 +453,10 @@ export function* responsesEventToChunks(
 
     if (type === 'response.completed') {
         const response = event.response as Record<string, unknown> | undefined;
+        if (Array.isArray(response?.output)) for (const item of response.output) retainContinuationItem(item, state);
         const usage = response?.usage as Record<string, unknown> | undefined;
+        const outputDetails = usage?.output_tokens_details as Record<string, unknown> | undefined;
+        state.estimatedTokens = num(outputDetails?.reasoning_tokens);
         if (usage) {
             const input = num(usage.input_tokens) ?? num(usage.prompt_tokens) ?? 0;
             const output = num(usage.output_tokens) ?? num(usage.completion_tokens) ?? 0;
@@ -468,4 +501,13 @@ export function* flushResponsesStreamState(
         yield* finalizeToolCall(call);
     }
     state.toolCalls.clear();
+    if (state.scope && (state.reasoning.size > 0 || state.phase)) {
+        const value = { reasoning: [...state.reasoning.values()], ...(state.phase ? { phase: state.phase } : {}) };
+        const continuation = { format: 'responses-v1', scope: state.scope, value,
+            ...(state.estimatedTokens !== undefined ? { estimatedTokens: state.estimatedTokens } : {}) };
+        if (readResponsesContinuation(continuation, state.scope)) yield { type: 'provider_state', state: continuation };
+        else log.warn('Responses continuation exceeded its storage bound; continuing with visible history.');
+        state.reasoning.clear();
+        state.phase = undefined;
+    }
 }

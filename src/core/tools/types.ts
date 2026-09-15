@@ -88,6 +88,7 @@ export type ToolName =
     // Revise an existing skill by name (write counterpart of read_skill).
     | 'write_skill'
     | 'update_todo_list'
+    | 'work_journal'
     // MCP
     | 'use_mcp_tool'
     // FEAT-24-06 / ADR-118: read the full description + input-schema summary
@@ -290,6 +291,7 @@ export interface ToolExecutionContext {
      * Used by attempt_completion tool.
      */
     signalCompletion?: (result: string) => void;
+    getWorkJournal?: () => import('../agent/WorkJournal').WorkJournal;
 
     /**
      * Publish the current todo list to the UI.

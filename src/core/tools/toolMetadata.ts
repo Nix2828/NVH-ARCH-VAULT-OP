@@ -264,17 +264,17 @@ export const TOOL_METADATA: Record<string, ToolMeta> = {
         group: 'read', label: 'Plaud delta', icon: 'file-audio',
         signature: 'compute_plaud_delta(plaud_files)',
         description: 'Given the Plaud list_files result, return which recordings are not yet imported. Dedup by the plaud id in each note\'s resource frontmatter, scanned vault-wide over the complete metadata index (no search cap, moved notes included). Deterministic, no LLM.',
-        example: 'compute_plaud_delta([{id:"c61779...", name:"Meeting X", start_at:"2026-07-23T09:00:00", duration:1830}, ...])',
-        whenToUse: 'The delta step of plaud-meeting-delta-ingest. Use this instead of search_files: search_files is capped at 500 files / 50 hits and misses already-imported notes, which caused duplicates.',
+        example: 'compute_plaud_delta([{id:"c61779...", name:"Meeting X", start_at:"2026-07-23T09:00:00", duration:7925000}, ...])',
+        whenToUse: 'The delta step of the plaud-import skill. duration arrives in MILLISECONDS. Use this instead of search_files: search_files is capped at 500 files / 50 hits and misses already-imported notes, which caused duplicates.',
         commonMistakes: 'Passing only a folder subset of recordings — pass the full list_files array so the set difference is complete.',
     },
     build_meeting_note_from_sink: {
         group: 'edit', label: 'Build meeting note', icon: 'file-audio',
-        signature: 'build_meeting_note_from_sink(sink_path, note_path, frontmatter?, delete_sink?)',
-        description: 'Turn a sinked Plaud get_transcript JSON into a raw meeting note natively (no sandbox write-rate or heap limit, transcript never enters the LLM). Keeps raw Speaker N labels; naming is done later by meeting-summary.',
-        example: 'build_meeting_note_from_sink("Inbox/.plaud-sink-{id}.json", "Inbox/{title}.md", {title:"...", resource:"...", timestamp:"...", type:"meeting"})',
-        whenToUse: 'Used by the plaud-meeting-delta-ingest skill to build each transcript note in a batch. Prefer this over run_skill_script for that transform: it has no 10/min write cap, so a full day of meetings ingests in one pass.',
-        commonMistakes: 'Sinking get_note (a summary) instead of get_transcript — the tool errors clearly on the wrong shape. Filling tags/moc/related here — leave them empty for meeting-summary.',
+        signature: 'build_meeting_note_from_sink(sink_path, note_path, extra_sink_paths?, frontmatter?, delete_sink?)',
+        description: 'Turn sinked Plaud get_transcript JSON page(s) into a raw meeting note natively (no sandbox write-rate or heap limit, transcript never enters the LLM). Joins the pages of one recording in offset order and refuses to write an incomplete transcript. Keeps raw Speaker N labels; naming is done later by meeting-summary.',
+        example: 'build_meeting_note_from_sink("Inbox/.plaud-sink-{id}-p1.json", "Inbox/{title}.md", ["Inbox/.plaud-sink-{id}-p2.json"], {title:"...", resource:"...", timestamp:"...", type:"meeting"})',
+        whenToUse: 'Used by the plaud-import skill to build each transcript note in a batch. Prefer this over run_skill_script for that transform: it has no 10/min write cap, so a full day of meetings ingests in one pass.',
+        commonMistakes: 'Sinking get_note (a summary) instead of get_transcript — the tool errors clearly on the wrong shape. Dropping the follow-up pages of a long recording — get_transcript caps at 500 segments per call, so pass every page via extra_sink_paths. Filling tags/moc/related here — leave them empty for meeting-summary.',
     },
     set_block_anchors: {
         group: 'edit', label: 'Set Block Anchors', icon: 'anchor',
@@ -506,6 +506,14 @@ If ANY check fails, call create_xlsx again with corrections.`,
         example: 'attempt_completion("Created summary note at Projects/summary.md")',
         whenToUse: 'After a multi-step tool workflow to signal completion. NOT for simple text responses.',
         commonMistakes: 'Using this for every response — only use after tool-based work with 2+ tool calls.',
+    },
+    work_journal: {
+        group: 'agent', label: 'Work evidence', icon: 'test-tube',
+        signature: 'work_journal(operation, ...)',
+        description: 'Persist hypotheses, alternatives and executable checks. Test local programs without files or network; select discriminating probes; verify actual files and reusable skill candidates.',
+        example: 'work_journal({ operation: "inspect" })',
+        whenToUse: 'Complex reasoning, counterexamples, verification, or resuming a compacted task.',
+        commonMistakes: 'Self-reported success is not verification. Define expected values before testing.',
     },
     update_todo_list: {
         group: 'agent', label: 'Update Plan', icon: 'list-checks',
@@ -822,50 +830,34 @@ If ANY check fails, call create_xlsx again with corrections.`,
  * self-development, niche agent utilities. Core read/edit/search/agent-control
  * tools stay in the default prompt.
  */
-export const DEFERRED_TOOL_NAMES: ReadonlySet<string> = new Set([
-    // Vault: rarely-needed intelligence helpers
-    'get_vault_stats',
-    'vault_health_check',
-    'search_by_tag',
-    'get_linked_notes',
-    'get_daily_note',
-    'open_note',
-    'query_base',
-    // Vault: specialised writers
-    'generate_canvas',
-    'create_excalidraw',
-    'create_drawio',
-    'create_base',
-    'update_base',
-    // Checkpoints (IMP-01-07-01): rarely-needed recovery helpers, same
-    // bucket as get_vault_stats/vault_health_check. find_tool hits
-    // "checkpoint" strongly in all four names, so deferring them saves
-    // four schemas per prompt without hurting discoverability.
-    'list_checkpoints',
-    'read_checkpoint',
-    'diff_checkpoint',
-    'restore_checkpoint',
-    // Office / presentation pipeline
-    // Note v2.10.0: create_xlsx, create_docx, create_pptx removed from the
-    // deferred set. Even though their schemas add ~150 tokens to every
-    // prompt, the find_tool round-trip they used to require invalidated
-    // the prompt cache on every Office tool call (40k+ cache-write tokens
-    // = ~75 cents at Opus). For users who create Office files even
-    // occasionally, the always-loaded schemas pay for themselves. The
-    // less-frequent plan_presentation and ingest_document stay deferred.
-    'plan_presentation',
-    'ingest_document',
-    // Web: archival clipper is specialised (rarely needed vs web_fetch/web_search).
-    'clip_web_page',
-    // Self-development + niche agent utilities
-    'evaluate_expression',
-    'manage_source',
-    'manage_mcp_server',
-    'resolve_capability_gap',
-    // FEAT-24-06 / ADR-118 second pass: rarely-needed introspection + settings.
-    'inspect_self',
-    'update_settings',
+export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
+    'read_file', 'read_document', 'list_files', 'search_files',
+    'write_file', 'edit_file', 'append_to_file', 'semantic_search',
+    'web_search', 'web_fetch', 'read_skill', 'run_skill_script',
+    'find_tool', 'use_mcp_tool', 'read_mcp_tool', 'update_todo_list',
+    'ask_followup_question', 'attempt_completion', 'recall_memory', 'search_history',
 ]);
+
+export const DEFERRED_TOOL_NAMES: ReadonlySet<string> = new Set(
+    Object.keys(TOOL_METADATA).filter(name => !CORE_TOOL_NAMES.has(name)),
+);
+
+/** Deterministic task profiles only preload capabilities, never restrict scope. */
+export function initialToolsForTask(text: string): string[] {
+    const tools = new Set<string>();
+    if (/\b(pptx|powerpoint|presentation|präsentation)\b/i.test(text)) {
+        tools.add('create_pptx'); tools.add('plan_presentation');
+    }
+    if (/\b(docx|word)\b/i.test(text)) tools.add('create_docx');
+    if (/\b(xlsx|excel|spreadsheet)\b/i.test(text)) tools.add('create_xlsx');
+    if (/\b(ingest|ingestion|erschließ|erschliess)/i.test(text)) {
+        tools.add('ingest_document'); tools.add('ingest_triage'); tools.add('ingest_deep');
+    }
+    if (/\b(plaud|meeting|transcript|transkript)/i.test(text)) {
+        tools.add('compute_plaud_delta'); tools.add('build_meeting_note_from_sink'); tools.add('set_block_anchors');
+    }
+    return [...tools];
+}
 
 /** FEATURE-1600: true when a tool is deferred and must be activated via find_tool. */
 export function isDeferredTool(toolName: string): boolean {
@@ -903,6 +895,7 @@ export function buildToolPromptSection(
      * subagent profile spawns to restrict the tool surface.
      */
     allowedNames?: string[],
+    compactDirectory = false,
 ): string {
     const allowSet = allowedNames && allowedNames.length > 0 ? new Set(allowedNames) : undefined;
     const parts: string[] = [];
@@ -912,7 +905,8 @@ export function buildToolPromptSection(
         let tools = getToolsForGroup(group);
         if (allowSet) tools = tools.filter(([name]) => allowSet.has(name));
         if (tools.length === 0) continue;
-        const lines = tools.map(([, meta]) => {
+        const lines = tools.map(([name, meta]) => {
+            if (compactDirectory) return `- ${name}: ${meta.label}`;
             let line = `- ${meta.signature}: ${meta.description}`;
             if (includeExamples) {
                 if (meta.example)        line += `\n  Example: ${meta.example}`;

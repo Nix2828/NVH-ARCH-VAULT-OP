@@ -304,10 +304,13 @@ export interface HeadlessApprovalPolicy {
 
 /** Extra context injected by AgentTask for agent-control tools */
 export interface ContextExtensions {
+    /** Host-only full text view before externalization/capping, also on cache hits. */
+    onFullResult?: (result: { content: string; isError: boolean }) => void;
     /** Abort signal for the currently running task */
     abortSignal?: AbortSignal;
     askQuestion?: (question: string, options?: string[]) => Promise<string>;
     signalCompletion?: (result: string) => void;
+    getWorkJournal?: () => import('../agent/WorkJournal').WorkJournal;
     /**
      * Request user approval for a tool call.
      *
@@ -498,7 +501,7 @@ export class ToolExecutionPipeline {
         this.runGrants.epoch = this.getRevocationEpoch();
     }
 
-    /** ADR-063: Get the externalizer (for Fast Path to disable during batch). */
+    /** ADR-063: Access the run-scoped full-result store. */
     getExternalizer(): ResultExternalizer | null {
         return this.resultExternalizer;
     }
@@ -687,7 +690,9 @@ export class ToolExecutionPipeline {
                 if (cached !== undefined) {
                     callbacks.log(`[Cache HIT] ${toolCall.name}`);
                     this.logOperation(toolCall, true, 0, undefined, '[cached]');
-                    return { type: 'tool_result', tool_use_id: toolCall.id, content: cached, is_error: false };
+                    extensions?.onFullResult?.({ content: cached, isError: false });
+                    const content = await this.prepareResult(toolCall, cached, false);
+                    return { type: 'tool_result', tool_use_id: toolCall.id, content, is_error: false };
                 }
             }
 
@@ -860,6 +865,7 @@ export class ToolExecutionPipeline {
                 // report it. Absent on the headless surfaces, which own no task.
                 reportAuxUsage: extensions?.reportAuxUsage,
                 signalCompletion: extensions?.signalCompletion,
+                getWorkJournal: extensions?.getWorkJournal,
                 updateTodos: extensions?.updateTodos,
                 switchMode: extensions?.switchMode,
                 spawnSubtask: extensions?.spawnSubtask,
@@ -923,7 +929,7 @@ export class ToolExecutionPipeline {
             // Cache successful read-only results for deduplication (text-only, FULL content)
             // FIX-PERF-23: enforce LRU cap + update pathIndex for O(1)
             // write-invalidation.
-            if (!executionHadError && ToolExecutionPipeline.CACHEABLE.has(toolCall.name)) {
+            if (!executionHadError && !multimodalContent && ToolExecutionPipeline.CACHEABLE.has(toolCall.name)) {
                 const key = this.cacheKey(toolCall.name, toolCall.input);
                 this.resultCache.delete(key);
                 this.resultCache.set(key, textContent);
@@ -950,33 +956,10 @@ export class ToolExecutionPipeline {
                 }
             }
 
-            // 6b. ADR-063: Context Externalization — write large results to temp files
-            // Must happen AFTER cache write (cache stores full content) and BEFORE return.
-            // Multimodal content (images) is never externalized.
-            let finalContent: string | import('../../api/types').ToolResultContentBlock[] = multimodalContent ?? textContent;
-            if (!multimodalContent && this.resultExternalizer) {
-                const ref = await this.resultExternalizer.maybeExternalize(
-                    toolCall.name, toolCall.input, textContent, executionHadError,
-                );
-                if (ref !== null) {
-                    finalContent = ref;
-                }
-            }
-
-            // 6c. FEAT-24-03 (ADR-63 amendment): hard per-tool output cap — the
-            // floor that catches anything the externalizer skipped or that slipped
-            // through (e.g. an MCP tool with a huge response).
-            {
-                const capChars = readAwareOutputCap(
-                    toolCall.name,
-                    this.apiHandler?.getModel()?.info?.contextWindow,
-                );
-                const capResult = capOversizedToolOutput(finalContent, executionHadError, capChars);
-                if (capResult.capped) {
-                    finalContent = capResult.content;
-                    console.debug(`[Pipeline] Capped ${toolCall.name} output ${capResult.originalLength} -> ${(finalContent as string).length} chars`);
-                }
-            }
+            extensions?.onFullResult?.({ content: textContent, isError: executionHadError });
+            const finalContent = await this.prepareResult(
+                toolCall, multimodalContent ?? textContent, executionHadError,
+            );
 
             // 6d. FIX-44-44: report a write that landed WITHOUT an individual
             // diff approval (settings-auto, run-scope grant, or a name-only
@@ -1008,6 +991,22 @@ export class ToolExecutionPipeline {
             this.logOperation(toolCall, false, Date.now() - startTime, errorMessage, undefined);
             return this.errorResult(toolCall.id, errorMessage);
         }
+    }
+
+    /** The same model-facing view for fresh and cached executions. */
+    private async prepareResult(
+        toolCall: ToolUse,
+        content: string | import('../../api/types').ToolResultContentBlock[],
+        isError: boolean,
+    ): Promise<string | import('../../api/types').ToolResultContentBlock[]> {
+        let view = content;
+        if (typeof content === 'string' && this.resultExternalizer) {
+            view = await this.resultExternalizer.maybeExternalize(
+                toolCall.name, toolCall.input, content, isError,
+            ) ?? content;
+        }
+        const cap = readAwareOutputCap(toolCall.name, this.apiHandler?.getModel()?.info?.contextWindow);
+        return capOversizedToolOutput(view, isError, cap).content;
     }
 
     // -------------------------------------------------------------------------
@@ -1081,11 +1080,16 @@ export class ToolExecutionPipeline {
         // REMOVED (dedup skip and normal path), so an ungoverned sink_path meant a
         // permanent, non-trash delete of any file the caller named -- reachable via
         // prompt injection, since the plaud id that drives the dedup branch comes
-        // from model-controlled frontmatter. Both keys are therefore write-side:
-        // isIgnored AND isProtected must hold before execute().
+        // from model-controlled frontmatter. All three keys are therefore
+        // write-side: isIgnored AND isProtected must hold before execute().
+        // extra_sink_paths (a long recording pages at 500 segments, so the
+        // follow-up pages arrive as their own sinks) is an ARRAY and is removed
+        // exactly like sink_path -- the array-aware loop below checks every
+        // element, so the delete cannot slip past governance through the list.
         build_meeting_note_from_sink: [
             { key: 'note_path', write: true },
             { key: 'sink_path', write: true },
+            { key: 'extra_sink_paths', write: true },
         ],
         // AUDIT 2026-07-14 BYP-1: these tools address their paths via
         // source_path/output_path/source_uri, none of which is `path`, so the

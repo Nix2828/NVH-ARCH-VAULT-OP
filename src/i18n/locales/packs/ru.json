@@ -806,6 +806,8 @@
     "tool.ask_followup_question.desc": "Задать пользователю уточняющий вопрос",
     "tool.attempt_completion": "Завершить задачу",
     "tool.attempt_completion.desc": "Сообщить о завершении задачи",
+    "tool.work_journal": "Проверка результатов",
+    "tool.work_journal.desc": "Записывать гипотезы и проверять результаты локально",
     "tool.update_todo_list": "Обновить задачи",
     "tool.update_todo_list.desc": "Показать чек-лист задач в чате",
     "tool.new_task": "Запустить суб-агента",

@@ -1146,6 +1146,8 @@ export const en = {
     'tool.ask_followup_question.desc': 'Ask the user a clarifying question',
     'tool.attempt_completion': 'Complete task',
     'tool.attempt_completion.desc': 'Signal that the task is done',
+    'tool.work_journal': 'Work evidence',
+    'tool.work_journal.desc': 'Track hypotheses and verify results locally',
     'tool.update_todo_list': 'Update todos',
     'tool.update_todo_list.desc': 'Show a task checklist in the chat',
     'tool.new_task': 'Spawn sub-agent',

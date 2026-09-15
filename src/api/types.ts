@@ -9,10 +9,19 @@
 
 import type { ToolDefinition } from '../core/tools/types';
 
+/** Opaque provider-owned continuation. The core stores it; only its matching adapter reads it. */
+export interface ProviderState {
+    format: string;
+    scope: string;
+    value: unknown;
+    estimatedTokens?: number;
+}
+
 // --- Stream Chunks ---
 
 export type ApiStreamChunk =
     | { type: 'text'; text: string }
+    | { type: 'provider_state'; state: ProviderState }
     // requiresPassback: set by providers whose API contract requires the reasoning
     // text to be echoed back on the next tool-resolution request (DeepSeek
     // deepseek-reasoner via OpenAI-compatible; see FIX-04-03-07). AgentTask
@@ -103,11 +112,14 @@ export type ContentBlock =
 export type MessageParam = {
     role: 'user' | 'assistant';
     content: string | ContentBlock[];
+    providerState?: ProviderState;
 };
 
 // --- ApiHandler Interface (adapted from Kilo Code's ApiHandler) ---
 
 export interface ApiHandler {
+    /** Context estimate for provider-owned state actually replayed by this handler. */
+    estimateProviderStateTokens?(state: ProviderState | undefined): number;
     /**
      * IMP-41-02-03: provider type this handler serves, stamped by
      * buildApiHandler. Consumed by the rate limiter and (W3) the circuit

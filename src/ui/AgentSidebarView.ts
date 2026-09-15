@@ -98,6 +98,7 @@ import { pickTabTitle, TITLE_SETTLES_AFTER } from './sidebar/deriveTabTitle';
 import { isUnnamedTitle } from '../core/history/ConversationStore';
 import { resolveSkillChatTitle } from '../core/skills/resolveSkillChatTitle';
 import { buildExplicitSkillInstructions } from '../core/skills/skillInventoryRenderer';
+import { buildSkillStorageContext } from '../core/skills/skillStorageContext';
 import { resolveRunTeardown } from './sidebar/runOwnership';
 import { repairUiMessages } from '../core/history/repairUiMessages';
 import { computeEditResendCut } from '../core/history/editResendCut';
@@ -2549,7 +2550,7 @@ export class AgentSidebarView extends ItemView {
         if (!this.textarea) return;
 
         const text = this.textarea.value.trim();
-        if (!text && this.attachments.pending.length === 0) return;
+        if (!text && this.attachments.pending.length === 0 && !this.attachments.isProcessing) return;
 
         // Issue 1: an ask_followup_question card is open and the loop is
         // paused on its resolver. A Send from the main input answers THAT
@@ -2652,6 +2653,10 @@ export class AgentSidebarView extends ItemView {
         // of leaking into whatever tab is active when an await resolves.
         const mySession = this.activeSession;
         const myContainer = mySession.chatContainer;
+
+        // FIX-19-31-03: a dropped PDF can still be parsing at Send. The
+        // existing send lock is already held, so a second click cannot race.
+        await this.attachments.whenReady();
 
         mySession.lastUserMessage = text;
 
@@ -2762,7 +2767,8 @@ export class AgentSidebarView extends ItemView {
                     // und derselbe Wortlaut wie bei read_skill. Vorher stand
                     // hier nur der Body, also fielen scripts/ und references/
                     // unter den Tisch und der Agent erfand den Weg neu.
-                    expandedText = buildExplicitSkillInstructions(matchedSkill, rest) + activeFileTail;
+                    const storage = await buildSkillStorageContext(this.app, matchedSkill.body);
+                    expandedText = storage + buildExplicitSkillInstructions(matchedSkill, rest) + activeFileTail;
                     // FIX-03-20-02: a skill may declare a deterministic chat
                     // title (chatTitle frontmatter, e.g. "Plaud {date}"). Set it
                     // NOW, not at task end: the task-end title block reads

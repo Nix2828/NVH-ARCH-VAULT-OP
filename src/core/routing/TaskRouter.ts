@@ -43,7 +43,7 @@ const SIMPLE_FILE_OP_RE = /^\s*(lies|read|schreibe?|write|oeffne|open)\b.*\.(md|
  * "analysierst", "analysiert" all hit `analysier`. The "fasse ...
  * zusammen" idiom needs its own clause since it splits the verb.
  */
-const COMPLEX_RESEARCH_RE = /\b(such\w*|finde|find|summari[sz]e\w*|analysier\w*|analyse\w*|erklaer\w*|explain\w*|recherchier\w*|research\w*|vergleich\w*|compare\w*|warum|why|wie funktioniert|how does)\b|\bfasse\b.*\bzusammen\b/i;
+const COMPLEX_RESEARCH_RE = /\b(such\w*|finde|find|summari[sz]e\w*|analysier\w*|analyse\w*|(?:erklär|erklaer)\w*|explain\w*|recherchier\w*|research\w*|vergleich\w*|compare\w*|warum|why|wie funktioniert|how does)\b|\bfasse\b.*\bzusammen\b/i;
 
 /**
  * Multi-step indicators. When the user explicitly chains steps, the
@@ -71,7 +71,8 @@ const COMPLEX_SKILL_CREATION_RE =
 const COMPLEX_SKILL_TRANSLATION_RE =
     /\b(translate|convert|port|uebersetze?|konvertier\w*|portier\w*)\b[^.\n]*\b(skills?|anthropic\s+skills?|python\s+skills?)\b|\b(import|hole|clone)\b[^.\n]*\banthropic\b[^.\n]*\bskills?/i;
 
-const SHORT_PROMPT_CHARS = 80;
+const COMPLEX_VERIFICATION_RE = /(?:\b(?:beweis|prüf|pruef|verifizier|validier|widerspr|prove|verify|audit|contradict|ingest|synthesi)|\b(?:alle|all|every)\b.*\b(?:belege|sources|quellen))/i;
+const SIMPLE_DIRECT_RE = /^(?:hi|hello|hallo|thanks|danke)[!. ]*$|\b(?:tippfehler|typo)\b|^(?:show|zeige)\s+(?:vault )?stats[!. ]*$/i;
 const LONG_PROMPT_CHARS = 300;
 
 /**
@@ -113,6 +114,7 @@ export class TaskRouter {
         if (text.length === 0) return 'unknown';
 
         // Strong complex signals win first
+        if (COMPLEX_VERIFICATION_RE.test(text)) return 'complex';
         if (COMPLEX_SKILL_CREATION_RE.test(text)) return 'complex';
         if (COMPLEX_SKILL_TRANSLATION_RE.test(text)) return 'complex';
         if (COMPLEX_MULTISTEP_RE.test(text)) return 'complex';
@@ -123,9 +125,7 @@ export class TaskRouter {
         if (SIMPLE_OFFICE_RE.test(text)) return 'simple';
         if (SIMPLE_FILE_OP_RE.test(text)) return 'simple';
 
-        // Short prompts that did not match anything obvious are usually
-        // small one-off tool calls. "Erstelle test.md" / "show vault stats".
-        if (text.length < SHORT_PROMPT_CHARS) return 'simple';
+        if (SIMPLE_DIRECT_RE.test(text)) return 'simple';
 
         return 'unknown';
     }

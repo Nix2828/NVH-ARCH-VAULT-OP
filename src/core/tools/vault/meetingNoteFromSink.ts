@@ -19,6 +19,27 @@ export interface PlaudBlock {
     [k: string]: unknown;
 }
 
+/**
+ * One sinked get_transcript result, normalized.
+ *
+ * The MCP server ships two shapes and both reach this file:
+ *   LEGACY  an array of blocks, the segments doubly-encoded in data_content.
+ *           Carries no counters, so completeness cannot be checked.
+ *   CURRENT one PAGE per call: { file_id, block, total, offset, limit,
+ *           returned, next_cursor, segments: [...] }. `limit` is capped at 500
+ *           server-side, so any recording above that arrives in several pages,
+ *           each sinked to its own file.
+ * Counters are null for the legacy shape; everything downstream treats null as
+ * "unknown", never as zero.
+ */
+interface SinkPage {
+    fileId: string | null;
+    segments: Segment[];
+    total: number | null;
+    offset: number;
+    nextCursor: string | null;
+}
+
 /** One decoded transcript segment. */
 interface Segment {
     content?: string;
@@ -76,6 +97,118 @@ function parseSegments(blocks: PlaudBlock[]): Segment[] {
         }
     }
     return segments;
+}
+
+/**
+ * The one outcome that is neither a success nor a defect: the recording exists,
+ * the call worked, and Plaud simply has nothing transcribed for it. It is worth
+ * its own message because every other reading sends the caller somewhere false
+ * -- a wrong id fails the MCP call outright, and a get_note sink carries a
+ * summary rather than nothing at all. Retrying does not help; the recording
+ * stays in the delta and is offered again on the next run.
+ */
+function noTranscriptError(): Error {
+    return new Error(
+        'The recording has no transcript: get_transcript succeeded but returned no segments, so Plaud has not ' +
+        'transcribed this recording (yet). This is NOT a wrong file_id (that fails the call itself) and NOT a ' +
+        'get_note sink. Skip the recording, report it as skipped, and offer it again on the next run. ' +
+        'No note was written.',
+    );
+}
+
+/**
+ * Normalize ONE sinked get_transcript result into a page.
+ *
+ * Accepts both shapes (see SinkPage) and refuses everything else loudly. The
+ * loud refusal matters: on 2026-08-22 the server had switched to the paged
+ * object shape, the array-only guard here threw, and the import died after the
+ * transcript was already on disk. An MCP error payload (e.g. the validation
+ * error for `limit: 1000`) also lands here as parseable JSON, and it must not
+ * be mistaken for a transcript.
+ */
+function extractSinkPage(payload: unknown): SinkPage {
+    // NOT TRANSCRIBED (yet): a successful get_transcript for a recording Plaud
+    // holds no transcript for answers with a bare `[]`. Verified live on
+    // 2026-09-02 against file_id c0d5f45d7cac39687edd1ae079461a9a, a 3h10
+    // recording: two bytes, no error. Shape-wise that is the legacy array, so
+    // without this branch parseSegments explains it as a get_note mix-up, which
+    // it demonstrably is not, and the caller goes hunting for the wrong bug.
+    if (Array.isArray(payload) && payload.length === 0) throw noTranscriptError();
+    // LEGACY: array of blocks, segments doubly-encoded, no counters.
+    if (Array.isArray(payload)) {
+        return { fileId: null, segments: parseSegments(payload as PlaudBlock[]), total: null, offset: 0, nextCursor: null };
+    }
+    // CURRENT: one page carrying its own segments plus the paging counters.
+    if (payload && typeof payload === 'object') {
+        const p = payload as Record<string, unknown>;
+        const isTransaction = p.block === 'transaction' || p.data_type === 'transaction';
+        if (isTransaction && Array.isArray(p.segments)) {
+            const segments = (p.segments as unknown[]).filter((s): s is Segment => !!s && typeof s === 'object');
+            // Same "nothing transcribed" case as the bare `[]` above, should the
+            // server ever answer it in the paged shape instead. total 0 says the
+            // recording holds no segments at all, which no partial page can.
+            if (segments.length === 0 && p.total === 0) throw noTranscriptError();
+            const cursor = p.next_cursor;
+            return {
+                fileId: typeof p.file_id === 'string' ? p.file_id : null,
+                segments,
+                total: typeof p.total === 'number' ? p.total : null,
+                offset: typeof p.offset === 'number' ? p.offset : 0,
+                nextCursor: typeof cursor === 'string' && cursor.length > 0 ? cursor : null,
+            };
+        }
+    }
+    throw new Error(
+        'Unrecognized get_transcript sink shape: expected either a page object with block:"transaction" and a ' +
+        '"segments" array, or the legacy array of transaction blocks. Was get_transcript sinked (not get_note), ' +
+        'and did the call succeed? An MCP error payload is parseable JSON but carries no segments.',
+    );
+}
+
+/**
+ * Refuse to build a note from an incomplete set of pages.
+ *
+ * A truncated transcript is worse than a failed import: the note looks finished
+ * and nothing downstream can tell that the last third of the conversation is
+ * missing. So this throws, and the message carries what the caller needs to
+ * recover -- the cursor to fetch next, or the two numbers that disagree. The
+ * caller sinks the missing page and repeats the build; nothing has been written
+ * or deleted at this point.
+ *
+ * The legacy shape has no counters, so it is exempt: nothing to check against.
+ */
+function assertComplete(pages: SinkPage[]): void {
+    const ids = new Set(pages.map((p) => p.fileId).filter((id): id is string => id !== null));
+    if (ids.size > 1) {
+        throw new Error(
+            `Sinks belong to different recordings (${[...ids].join(', ')}). One note is built from the pages of ` +
+            'ONE recording; check that extra_sink_paths lists the follow-up pages of this file_id only.',
+        );
+    }
+
+    const totals = pages.map((p) => p.total).filter((t): t is number => t !== null);
+    if (totals.length === 0) return; // legacy shape, no counters to check
+
+    const last = pages[pages.length - 1];
+    if (last.nextCursor) {
+        throw new Error(
+            `Transcript incomplete: the last sinked page still carries next_cursor "${last.nextCursor}". ` +
+            `Call get_transcript again with cursor:"${last.nextCursor}" (limit 500), sink it to its own file, ` +
+            'and pass every page to this tool in one call. No note was written.',
+        );
+    }
+
+    const expected = Math.max(...totals);
+    const got = pages.reduce((n, p) => n + p.segments.length, 0);
+    if (got !== expected) {
+        throw new Error(
+            `Transcript incomplete: the sinked pages hold ${got} segments but the recording has ${expected}. ` +
+            (got < expected
+                ? 'A page is missing -- fetch the remaining pages via next_cursor and pass all of them in one call.'
+                : 'A page was passed twice -- pass each page exactly once, ordered by offset.') +
+            ' No note was written.',
+        );
+    }
 }
 
 /**
@@ -145,13 +278,21 @@ export function quoteIfNeeded(value: string): string {
 }
 
 /**
- * Build the full note markdown (frontmatter + placeholders + transcript) from
- * decoded Plaud blocks. Speaker labels stay RAW (`**Speaker N:**`); naming is a
- * later, evidence-bound step done by meeting-summary, never guessed here.
+ * Build the full note markdown (frontmatter + transcript) from one or more
+ * sinked get_transcript results. Several payloads are the pages of ONE
+ * recording, joined in offset order; an incomplete set throws rather than
+ * writing a note that is quietly missing its tail. Speaker labels stay RAW
+ * (`**Speaker N:**`); naming is a later, evidence-bound step done by
+ * meeting-summary, never guessed here.
  */
-export function buildMeetingNoteFromBlocks(blocks: PlaudBlock[], frontmatter: MeetingFrontmatter): BuildResult {
-    if (!Array.isArray(blocks)) throw new Error('Sink JSON is not an array (unexpected get_transcript shape)');
-    const segments = parseSegments(blocks);
+export function buildMeetingNoteFromPages(payloads: unknown[], frontmatter: MeetingFrontmatter): BuildResult {
+    if (!Array.isArray(payloads) || payloads.length === 0) throw new Error('no get_transcript sink payload given');
+    // Sort by offset, never trust argument order: a page list handed over in the
+    // wrong order would otherwise produce a scrambled transcript that still
+    // passes every count check.
+    const pages = payloads.map(extractSinkPage).sort((a, b) => a.offset - b.offset);
+    assertComplete(pages);
+    const segments = pages.flatMap((p) => p.segments);
     if (segments.length === 0) throw new Error('transaction block had no segments');
 
     // Segments -> speaker turns; merge consecutive same-speaker segments.
@@ -215,4 +356,12 @@ export function buildMeetingNoteFromBlocks(blocks: PlaudBlock[], frontmatter: Me
         speakerLines: turns.length,
         segmentCount: segments.length,
     };
+}
+
+/**
+ * Single-payload entry point, kept for callers and tests that hand over exactly
+ * one sinked result. Both shapes go through the same normalization.
+ */
+export function buildMeetingNoteFromBlocks(payload: unknown, frontmatter: MeetingFrontmatter): BuildResult {
+    return buildMeetingNoteFromPages([payload], frontmatter);
 }

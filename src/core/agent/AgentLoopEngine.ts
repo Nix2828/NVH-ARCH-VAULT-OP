@@ -15,11 +15,12 @@
  * is the parity gate per stage.
  */
 
-import type { ApiStreamChunk, ContentBlock, MessageParam, ToolResultContentBlock } from '../../api/types';
+import type { ApiStreamChunk, ContentBlock, MessageParam, ToolResultContentBlock, ProviderState } from '../../api/types';
 import type { AgentLoopState } from './LoopState';
 import type { LoopInterceptor, LoopInterceptorContext } from './interceptors/types';
 import { ThinkingSegmentCollector } from './thinkingSegments';
-import { splitToolBatch } from './splitToolBatch';
+import { groupToolBatch } from './splitToolBatch';
+import { minimumCondenseGain } from '../condensingDefaults';
 import { applyAggregateBudget } from './toolResultBudget';
 
 /** UI/host feedback ports for one streamed turn. */
@@ -47,6 +48,7 @@ export interface StreamPorts {
 
 /** Classified result of one streamed assistant turn. */
 export interface StreamTurnResult {
+    providerState?: ProviderState;
     textParts: string[];
     thinking: ThinkingSegmentCollector;
     toolUses: Array<Extract<ContentBlock, { type: 'tool_use' }>>;
@@ -246,7 +248,9 @@ export class AgentLoopEngine {
         };
 
         for await (const chunk of stream) {
-            if (chunk.type === 'thinking') {
+            if (chunk.type === 'provider_state') {
+                result.providerState = chunk.state;
+            } else if (chunk.type === 'thinking') {
                 ports.onThinking(chunk.text);
                 if (chunk.requiresPassback) result.thinking.push(chunk.text);
             } else if (chunk.type === 'thinking_signature') {
@@ -375,28 +379,18 @@ export class AgentLoopEngine {
             resultToolNames.push(toolUse.name);
         };
 
-        // IMP-41-02-02: maximal parallel-safe PREFIX runs concurrently,
-        // the rest sequentially in model order (a read AFTER a write may
-        // depend on that write — only the prefix is split).
-        const { parallelPrefix, sequentialRest } = splitToolBatch(validToolUses, ports.parallelSafe);
-
-        if (parallelPrefix.length > 0) {
-            // Results are processed in original order after all finish so
-            // the FIFO queue in AgentSidebarView assigns results to the
-            // correct UI elements.
-            const results = await Promise.all(parallelPrefix.map((t) => ports.executeTool(t)));
-            for (let i = 0; i < parallelPrefix.length; i++) {
-                processToolResult(parallelPrefix[i], results[i]);
+        // Each write/control effect is an exclusive barrier. Readers after
+        // it observe the completed write, and may then run concurrently.
+        for (const group of groupToolBatch(validToolUses, ports.parallelSafe)) {
+            if (ports.isAborted() || state.completionResult !== null) break;
+            // Drain every started operation even on a rejection. Never start
+            // the next wave while a previous tool is still running.
+            const results = await Promise.allSettled(group.map(t => ports.executeTool(t)));
+            for (let i = 0; i < group.length; i++) {
+                const result = results[i];
+                if (result.status === 'rejected') throw result.reason;
+                processToolResult(group[i], result.value);
             }
-        }
-
-        for (const toolUse of sequentialRest) {
-            // Abort between sequential tools: a long write chain should
-            // stop at the next boundary, not run to batch end.
-            if (ports.isAborted()) break;
-            const result = await ports.executeTool(toolUse);
-            processToolResult(toolUse, result);
-            if (state.completionResult !== null) break;
         }
 
         // FIX-24-03-05 / ADR-157 defence line 1: bound the SUM of this
@@ -535,30 +529,13 @@ export class AgentLoopEngine {
         threshold: number,
         ports: CondensePorts,
     ): Promise<void> {
-        const firstOk = await ports.condense(history);
-        if (!firstOk) return;
-
-        let condensingRetries = 0;
-        const MAX_CONDENSING_RETRIES = 2;
-        let nextTail = 10_000;
-
-        while (condensingRetries < MAX_CONDENSING_RETRIES) {
-            const postTokens = ports.estimateTokens(history);
-            if (postTokens <= threshold) break;
-
-            nextTail = Math.max(1_000, Math.floor(nextTail / 2));
-            console.warn(
-                `[AgentLoopEngine] Still over threshold after condensing (${postTokens} > ${threshold}). ` +
-                `Retry ${condensingRetries + 1}/${MAX_CONDENSING_RETRIES} with tail=${nextTail} tokens`
-            );
-
-            const retryOk = await ports.condense(history, nextTail);
-            if (!retryOk) break;
-            condensingRetries++;
-        }
-
-        if (condensingRetries > 0) {
-            console.debug(`[AgentLoopEngine] Required ${condensingRetries + 1} condensing passes to stay under threshold`);
+        let before = ports.estimateTokens(history);
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const ok = await ports.condense(history, attempt === 0 ? undefined : 10_000 / (2 ** attempt));
+            if (!ok) return;
+            const after = ports.estimateTokens(history);
+            if (after <= threshold || before - after < minimumCondenseGain(before)) return;
+            before = after;
         }
     }
 }
