@@ -114,3 +114,44 @@ project.
 
 **The factory = elsewhere.** Different job, different repo, clean history, no inherited
 licence obligations unless we actually take code.
+
+---
+
+## PARKED — not to be solved yet
+
+Captured 2026-09-17 so it stops occupying working memory. **Do not solve this until Nic
+opens it.** Noted here verbatim-ish, not evaluated.
+
+### P1. Where do protocols live for global + web work?
+
+**The problem.** The desktop setup says: write the lot into the CLAUDE.md on the interface,
+including the rules as displayed. Fine for desktop. But:
+
+- Web sessions get the **index** of the @-imports, not their contents. Archie-on-web can see
+  `@rules/03-working-style.md` is listed. He cannot see a single line of it.
+- There are no custom instructions for an individual web thread.
+- So protocols that are neither project-specific nor desktop-only — the ones that apply at
+  **global and web level, like right now** — currently have nowhere to live.
+
+**Rejected already (Nic's call, not up for re-litigation):**
+- "Just make them skills." Means remembering every protocol that's already a desktop rule,
+  and remembering to add it to web environments only. Too much overhead without a plan.
+
+**Floated, not decided:**
+- An `NVH-ARCH-Protocols` repo, installed as a plugin.
+
+**Status.** Open. Named, not solved. Needs a plan before anything gets built.
+
+### P2. Repo naming — Claude and Codex kept apart
+
+`NVH-MASTER-ENV` → `NVH-ARCH-MASTER-ENV`, so it reads as Claude-only. Codex environments stay
+separate and separately named. This is a cognitive-load decision, deliberately taken, and is
+**not** an invitation to propose shared branches or worktrees.
+
+### Related finding (from this session)
+
+**The @-imports do not travel.** Every session outside the desktop starts with Nic's operating
+instructions missing — index present, contents absent. Whatever the factory produces has to
+carry the rules, working style and memory *with* it, not by reference to files that exist only
+on one laptop. This is the same layer gap the project exists to close, showing up in the tooling
+we are using to build it.
